@@ -28,6 +28,7 @@ jobs:
       contents: read
       issues: write
       pull-requests: write
+      actions: write
       id-token: write
     outputs:
       pr: ${{ steps.guard.outputs.pr }}

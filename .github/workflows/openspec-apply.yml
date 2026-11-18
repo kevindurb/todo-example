@@ -5,7 +5,7 @@ on:
     types: [labeled]
 
 concurrency:
-  group: factory-issue-${{ github.event.issue.number }}
+  group: factory-apply-${{ github.event.issue.number }}
   cancel-in-progress: false
 
 permissions:
