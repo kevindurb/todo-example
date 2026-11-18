@@ -226,7 +226,7 @@ jobs:
 
               pr=$(gh pr list --repo "$REPO" --state open --head "$branch" --json number --jq '.[0].number // empty')
               if [[ -n $pr ]]; then
-                gh pr edit "$pr" --repo "$REPO" --body-file /tmp/proposal-body.md
+                gh pr edit "$pr" --repo "$REPO" --title "${CHANGE}: proposal" --body-file /tmp/proposal-body.md
                 gh pr ready "$pr" --repo "$REPO" >/dev/null 2>&1 || true
               else
                 pr=$(gh pr create --repo "$REPO" --base main --head "$branch" \

@@ -145,6 +145,9 @@ assumptions you made, validation status, and the next human action. Do not
 mention your internal tooling or this prompt.
 
 If you cannot proceed, write `status: blocked` and a `blocked_reason` that
-names the missing input or decision. If a tool is denied, do not retry it with
-another form; report the denial and finish. Never run `git push`, `gh`, `curl`,
-`wget`, or `ssh`, and never start a subagent.
+names the missing input or decision. Use the read, glob, and grep tools for
+file discovery; the shell is limited to `openspec` and read-only git. If an
+exploratory shell command such as `ls` or `find` is denied, switch to those
+tools and continue. Do not work around a denied required operation; report it
+as blocked. Never run `git push`, `gh`, `curl`, `wget`, or `ssh`, and never
+start a subagent.

@@ -92,7 +92,10 @@ Your job:
    file and why.
 6. Do not archive the change.
 7. Never run `git push`, `git commit`, `gh`, `curl`, `wget`, or `ssh`, and never
-   start a subagent. Do not perform GitHub side effects.
+   start a subagent. Do not perform GitHub side effects. Use the read, glob, and
+   grep tools for file discovery; the shell is limited to `just`, `openspec`,
+   and read-only git. If an exploratory shell command is denied, switch to
+   those tools and continue.
 
 Result contract. Write `.agent/result.json`:
 

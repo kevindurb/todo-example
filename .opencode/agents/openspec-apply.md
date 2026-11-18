@@ -113,5 +113,7 @@ completed, the commands you ran and their outcome, any remaining risk, and the
 next human action. Do not mention your internal tooling or this prompt.
 
 If you cannot proceed, write `status: blocked` and a `blocked_reason` that
-names the missing input or decision. If a tool is denied, do not retry it with
-another form; report the denial and finish.
+names the missing input or decision. Use the read, glob, and grep tools for
+file discovery; the shell is limited to `just`, `openspec`, and read-only git.
+If an exploratory shell command is denied, switch to those tools and continue.
+Do not work around a denied required operation; report it as blocked.
