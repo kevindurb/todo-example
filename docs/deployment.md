@@ -14,7 +14,7 @@ running as a non-root user, with SQLite on a mounted data volume.
 | Registry | GitHub Container Registry |
 | Image | `ghcr.io/kevindurb/todo-example` |
 | Default tag | `latest` (moving `main`) |
-| Commit tag | `sha-<commit>` |
+| Commit tag | `sha-<first 7 characters of the commit>` |
 | Release tag | the pushed `v<version>` tag, for example `v1.2.3` |
 | Port | `8080` |
 | Data path | `/data/todos.db` |
@@ -111,12 +111,16 @@ docker start todo
 If you copy while the app is running, copy `todos.db`, `todos.db-wal`, and
 `todos.db-shm` together and keep them in the same directory.
 
-Restore by stopping the container, replacing `/data/todos.db` (and removing any
-stale `-wal`/`-shm` files), and starting it again:
+Restore by stopping the container, replacing `/data/todos.db`, removing any
+stale `-wal`/`-shm` files, and starting it again. The runtime image is
+distroless and has no shell, so a throwaway container removes the stale files
+from the same volume:
 
 ```sh
 docker stop todo
 docker cp ./todos.db todo:/data/todos.db
+docker run --rm --volume todo-data:/data busybox:1.36 \
+  sh -c 'rm -f /data/todos.db-wal /data/todos.db-shm'
 docker start todo
 ```
 

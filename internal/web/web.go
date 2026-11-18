@@ -65,7 +65,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /todos/{id}/status", s.handleSetStatus)
 	mux.HandleFunc("GET /todos/{id}/delete", s.handleDeleteConfirm)
 	mux.HandleFunc("POST /todos/{id}/delete", s.handleDelete)
-	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(s.staticFS)))
+	mux.HandleFunc("GET /static/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/static/" {
+			s.renderError(w, http.StatusNotFound, "Page not found", "That page does not exist.")
+			return
+		}
+		http.StripPrefix("/static/", http.FileServerFS(s.staticFS)).ServeHTTP(w, r)
+	})
 
 	return s.withLogging(s.withSecurityHeaders(mux))
 }

@@ -439,6 +439,14 @@ func TestStylesheetIsServed(t *testing.T) {
 	}
 }
 
+func TestStaticDirectoryIsNotFound(t *testing.T) {
+	srv, _ := newTestServer(t)
+	rec := request(srv, http.MethodGet, "/static/", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	srv, st := newTestServer(t)
 
