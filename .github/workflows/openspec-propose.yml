@@ -1,0 +1,313 @@
+name: OpenSpec propose
+
+on:
+  issues:
+    types: [labeled]
+
+concurrency:
+  group: factory-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  guard:
+    if: github.event.label.name == 'opsx:propose' && github.event.issue.state == 'open'
+    runs-on: ubuntu-latest
+    outputs:
+      allowed: ${{ steps.check.outputs.allowed }}
+      change: ${{ steps.check.outputs.change }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check the request
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          TITLE: ${{ github.event.issue.title }}
+          ACTOR: ${{ github.event.sender.login }}
+        run: |
+          set -euo pipefail
+          allowed=false
+          change=$(./scripts/factory-slug.sh "$ISSUE" "$TITLE")
+
+          permission=$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" --jq .permission 2>/dev/null || echo none)
+          case "$permission" in
+            admin|maintain|write) ;;
+            *)
+              gh issue edit "$ISSUE" --repo "$REPO" --remove-label opsx:propose --remove-label opsx:proposing >/dev/null 2>&1 || true
+              gh issue comment "$ISSUE" --repo "$REPO" --body "Only a maintainer (write, maintain, or admin permission) can start a phase. @${ACTOR}, this command was ignored." >/dev/null
+              gh issue edit "$ISSUE" --repo "$REPO" --add-label opsx:blocked >/dev/null 2>&1 || true
+              printf 'allowed=%s\nchange=%s\n' "$allowed" "$change" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          active=$(find openspec/changes -mindepth 1 -maxdepth 1 -type d -name "gh${ISSUE}-*" -printf '%f\n' 2>/dev/null | head -1 || true)
+          open_pr_json=$(gh pr list --repo "$REPO" --state open --json number,url,headRefName,isDraft \
+            --jq ".[] | select(.headRefName | startswith(\"opsx/propose-gh${ISSUE}-\")) | \"\(.headRefName)|\(.number)|\(.isDraft)|\(.url)\"" 2>/dev/null | head -1 || true)
+          open_pr=""
+          open_pr_branch=""
+          open_pr_draft=false
+          if [[ -n $open_pr_json ]]; then
+            IFS='|' read -r open_pr_branch open_pr_number open_pr_draft open_pr_url <<< "$open_pr_json"
+            open_pr="#${open_pr_number} ${open_pr_url}"
+          fi
+          issue_labels=$(gh issue view "$ISSUE" --repo "$REPO" --json labels --jq '.labels[].name')
+          if grep -qxE 'opsx:(proposal-approved|impl-review|impl-approved|archive-review|done)' <<< "$issue_labels"; then
+            gh issue edit "$ISSUE" --repo "$REPO" --remove-label opsx:propose >/dev/null 2>&1 || true
+            gh issue comment "$ISSUE" --repo "$REPO" --body "The proposal gate is already past review. \`opsx:propose\` is not applicable; use \`opsx:implement\` or \`opsx:archive\` according to the current lifecycle label." >/dev/null
+            printf 'allowed=%s\nchange=%s\n' "$allowed" "$change" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          blocked=false
+          grep -qx 'opsx:blocked' <<< "$issue_labels" && blocked=true
+
+          # Continue an existing change rather than creating a second one. A
+          # draft PR or a blocked issue is the documented retry path.
+          if [[ -n $active ]]; then
+            change=$active
+          fi
+
+          duplicate=false
+          if [[ -n $open_pr ]]; then
+            if [[ $open_pr_draft != true && $blocked != true ]]; then
+              duplicate=true
+            elif [[ $open_pr_branch != "opsx/propose-${change}" ]]; then
+              duplicate=true
+            fi
+          fi
+
+          if [[ $duplicate == true ]]; then
+            gh issue edit "$ISSUE" --repo "$REPO" --remove-label opsx:propose --remove-label opsx:proposing >/dev/null 2>&1 || true
+            gh issue edit "$ISSUE" --repo "$REPO" --add-label opsx:blocked >/dev/null 2>&1 || true
+            {
+              printf 'This issue already has an approved-for-review proposal PR.\n\n'
+              if [[ -n $active ]]; then printf -- '- Change: `%s`\n' "$active"; fi
+              if [[ -n $open_pr ]]; then printf -- '- Pull request: %s\n' "$open_pr"; fi
+              printf '\nNo second change was created. Use `/revise` on the proposal PR, or\n'
+              printf 'remove `opsx:blocked` before retrying a command.\n'
+            } > /tmp/duplicate.md
+            gh issue comment "$ISSUE" --repo "$REPO" --body-file /tmp/duplicate.md >/dev/null
+            printf 'allowed=%s\nchange=%s\n' "$allowed" "$change" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          gh issue edit "$ISSUE" --repo "$REPO" \
+            --remove-label opsx:propose \
+            --remove-label opsx:triage \
+            --remove-label opsx:blocked >/dev/null 2>&1 || true
+          gh issue edit "$ISSUE" --repo "$REPO" --add-label opsx:proposing >/dev/null
+          printf 'allowed=true\nchange=%s\n' "$change" >> "$GITHUB_OUTPUT"
+
+  propose:
+    needs: guard
+    if: needs.guard.outputs.allowed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Continue an existing proposal branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CHANGE: ${{ needs.guard.outputs.change }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${GH_TOKEN}"
+          branch="opsx/propose-${CHANGE}"
+          if git ls-remote --exit-code --heads "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "refs/heads/${branch}" >/dev/null 2>&1; then
+            git fetch --no-tags "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "refs/heads/${branch}"
+            git checkout -B "$branch" FETCH_HEAD
+            echo "Continuing existing branch ${branch}"
+          fi
+
+      - name: Build the agent context
+        env:
+          PHASE: propose
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          CHANGE_NAME: ${{ needs.guard.outputs.change }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: ./scripts/factory-context.sh
+
+      - name: Run the propose agent
+        uses: ./.github/actions/openspec-agent
+        with:
+          agent: openspec-propose
+          tailscale-client-id: ${{ vars.TS_CLIENT_ID }}
+          tailscale-audience: ${{ vars.TS_AUDIENCE }}
+          timeout-minutes: "20"
+
+      - name: Publish the proposal
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          CHANGE: ${{ needs.guard.outputs.change }}
+          EXPECTED_PHASE: propose
+          EXPECTED_CHANGE: ${{ needs.guard.outputs.change }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${GH_TOKEN}"
+
+          status=failed
+          summary="The propose agent did not produce a valid result."
+          blocked_reason="The result file was missing or invalid."
+          if ./scripts/factory-result.sh; then
+            status=$(jq -r '.status' .agent/result.json)
+            summary=$(jq -r '.summary' .agent/result.json)
+            blocked_reason=$(jq -r '.blocked_reason // ""' .agent/result.json)
+          else
+            printf '## Propose failed\n\n%s\n' "$summary" > .agent/report.md
+          fi
+
+          pr=""
+          outcome=blocked
+          if [[ $status == ok ]]; then
+            if [[ ! -d "openspec/changes/${CHANGE}" ]]; then
+              outcome=blocked
+              blocked_reason="The agent reported success but created no change directory."
+            elif ! openspec validate "$CHANGE" --strict; then
+              outcome=blocked
+              blocked_reason="The generated change failed OpenSpec validation."
+            else
+              mapfile -t changed < <({ git diff --name-only; git ls-files --others --exclude-standard; } | sort -u)
+              bad=()
+              for path in "${changed[@]:-}"; do
+                [[ -z $path ]] && continue
+                [[ $path == "openspec/changes/${CHANGE}/"* || $path == .agent/* ]] || bad+=("$path")
+              done
+              if (( ${#bad[@]} > 0 )); then
+                outcome=blocked
+                blocked_reason="The propose agent wrote outside the change directory: ${bad[*]}"
+              fi
+            fi
+
+            if [[ $outcome != blocked ]]; then
+              branch="opsx/propose-${CHANGE}"
+              git config user.name "openspec-factory[bot]"
+              git config user.email "openspec-factory@users.noreply.github.com"
+              git checkout -B "$branch"
+              git add "openspec/changes/${CHANGE}"
+              if ! git diff --cached --quiet; then
+                git commit -m "${CHANGE}: propose"
+              fi
+              git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${branch}"
+
+              {
+                printf 'Refs #%s\n\n' "$ISSUE"
+                printf '## Proposal for `%s`\n\n' "$CHANGE"
+                printf 'This PR is planning only. The implementation PR stays separate, and\n'
+                printf 'only the archive PR closes the issue.\n\n'
+                sed -E 's/\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b/reference/Ig' .agent/report.md
+              } > /tmp/proposal-body.md
+
+              pr=$(gh pr list --repo "$REPO" --state open --head "$branch" --json number --jq '.[0].number // empty')
+              if [[ -n $pr ]]; then
+                gh pr edit "$pr" --repo "$REPO" --body-file /tmp/proposal-body.md
+                gh pr ready "$pr" --repo "$REPO" >/dev/null 2>&1 || true
+              else
+                pr=$(gh pr create --repo "$REPO" --base main --head "$branch" \
+                  --title "${CHANGE}: proposal" --body-file /tmp/proposal-body.md)
+                pr=${pr##*/}
+              fi
+              outcome=ok
+            fi
+          fi
+
+          if [[ $outcome == ok ]]; then
+            gh issue edit "$ISSUE" --repo "$REPO" --remove-label opsx:blocked --add-label opsx:proposal-review >/dev/null 2>&1 || true
+            REPO="$REPO" ISSUE_NUMBER="$ISSUE" CHANGE_NAME="$CHANGE" \
+              STATE=opsx:proposal-review PROPOSAL_PR="$pr" RUN_URL="$RUN_URL" \
+              NEXT_ACTION="Review and merge proposal PR #${pr}." \
+              ./scripts/factory-status.sh
+          else
+            gh issue edit "$ISSUE" --repo "$REPO" --add-label opsx:blocked >/dev/null 2>&1 || true
+            {
+              printf '## Propose blocked\n\n'
+              printf '%s\n\n' "${blocked_reason:-$summary}"
+              printf 'The change is at `openspec/changes/%s/`.\n' "$CHANGE"
+              printf 'Remove `opsx:blocked` and re-apply `opsx:propose` to retry.\n'
+            } > /tmp/proposal-blocked.md
+            gh issue comment "$ISSUE" --repo "$REPO" --body-file /tmp/proposal-blocked.md >/dev/null
+
+            if [[ $status != failed && -d "openspec/changes/${CHANGE}" ]] \
+              && find "openspec/changes/${CHANGE}" -name '*.md' -print -quit | grep -q .; then
+              branch="opsx/propose-${CHANGE}"
+              git config user.name "openspec-factory[bot]"
+              git config user.email "openspec-factory@users.noreply.github.com"
+              git checkout -B "$branch"
+              git add "openspec/changes/${CHANGE}"
+              git commit -m "${CHANGE}: propose (partial)" || true
+              git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${branch}"
+              {
+                printf 'Refs #%s\n\n' "$ISSUE"
+                printf '## Draft proposal for `%s`\n\n' "$CHANGE"
+                printf 'This draft exists because the propose phase stopped. Read the reason\n'
+                printf 'below, then remove `opsx:blocked` and re-apply `opsx:propose`.\n\n'
+                printf '**Reason:** %s\n\n' "${blocked_reason:-$summary}"
+                sed -E 's/\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b/reference/Ig' .agent/report.md 2>/dev/null || true
+              } > /tmp/proposal-draft.md
+              pr=$(gh pr list --repo "$REPO" --state open --head "$branch" --json number --jq '.[0].number // empty')
+              if [[ -z $pr ]]; then
+                pr=$(gh pr create --repo "$REPO" --base main --head "$branch" --draft \
+                  --title "${CHANGE}: proposal (draft)" --body-file /tmp/proposal-draft.md)
+                pr=${pr##*/}
+              fi
+            fi
+
+            REPO="$REPO" ISSUE_NUMBER="$ISSUE" CHANGE_NAME="$CHANGE" \
+              STATE=opsx:blocked BLOCKED_REASON="${blocked_reason:-$summary}" \
+              PROPOSAL_PR="$pr" RUN_URL="$RUN_URL" \
+              NEXT_ACTION="Read the blocking reason, then remove opsx:blocked and re-apply opsx:propose." \
+              ./scripts/factory-status.sh || true
+          fi
+
+          printf 'outcome=%s\npr=%s\n' "$outcome" "$pr" >> "$GITHUB_OUTPUT"
+
+      - name: Report an unexpected failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          CHANGE: ${{ needs.guard.outputs.change }}
+        run: |
+          set -euo pipefail
+          reason="The propose run failed before it could publish a result."
+          gh issue edit "$ISSUE" --repo "$REPO" --add-label opsx:blocked >/dev/null 2>&1 || true
+          gh issue comment "$ISSUE" --repo "$REPO" --body "${reason} See [the run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}), remove \`opsx:blocked\`, and re-apply \`opsx:propose\`." >/dev/null
+          REPO="$REPO" ISSUE_NUMBER="$ISSUE" CHANGE_NAME="$CHANGE" \
+            STATE=opsx:blocked BLOCKED_REASON="$reason" \
+            RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            NEXT_ACTION="Read the run log, then remove opsx:blocked and re-apply opsx:propose." \
+            ./scripts/factory-status.sh || true
+
+      - name: Remove the running label
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: gh issue edit "$ISSUE" --repo "$REPO" --remove-label opsx:proposing >/dev/null 2>&1 || true

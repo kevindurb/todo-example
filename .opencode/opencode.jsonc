@@ -1,0 +1,40 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // The factory uses the private Aperture endpoint over the tailnet. There is
+  // no API key: the endpoint is only reachable from an ephemeral `tag:ci` node.
+  "model": "aperture/deepseek-v4.1-flash",
+  "providers": {
+    "aperture": {
+      "name": "Aperture",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "https://ai.beaver-cloud.ts.net/v1"
+      },
+      "models": {
+        "deepseek-v4.1-flash": {
+          "name": "DeepSeek V4.1 Flash",
+          "limit": {
+            "context": 1048576,
+            "output": 384000
+          }
+        }
+      }
+    }
+  },
+  "mcp": {
+    "servers": {
+      "aperture": {
+        "type": "remote",
+        "url": "https://ai.beaver-cloud.ts.net/v1/mcp",
+        "oauth": false,
+        // Native tool names keep per-tool permission rules meaningful; Code
+        // Mode would collapse the server behind a single `execute` action.
+        "codemode": false,
+        "timeout": {
+          "startup": 45000,
+          "catalog": 30000
+        }
+      }
+    }
+  }
+}

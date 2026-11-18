@@ -1,0 +1,320 @@
+name: OpenSpec revise
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+
+concurrency:
+  group: factory-pr-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  guard:
+    if: >
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null) ||
+      (github.event_name == 'pull_request_review' && github.event.review.state == 'changes_requested')
+    runs-on: ubuntu-latest
+    outputs:
+      allowed: ${{ steps.check.outputs.allowed }}
+      pr: ${{ steps.check.outputs.pr }}
+      change: ${{ steps.check.outputs.change }}
+      issue: ${{ steps.check.outputs.issue }}
+      scope: ${{ steps.check.outputs.scope }}
+      head_ref: ${{ steps.check.outputs.head_ref }}
+      feedback_b64: ${{ steps.check.outputs.feedback_b64 }}
+      feedback_hash: ${{ steps.check.outputs.feedback_hash }}
+      feedback_author: ${{ steps.check.outputs.feedback_author }}
+      feedback_state: ${{ steps.check.outputs.feedback_state }}
+    steps:
+      - name: Check the request
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          REVIEW_BODY: ${{ github.event.review.body }}
+          REVIEW_AUTHOR: ${{ github.event.review.user.login }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+
+          if [[ $EVENT == issue_comment ]]; then
+            pr=$ISSUE_NUMBER
+            if ! grep -Eiq '(^|[[:space:]])/revise([[:space:]]|$)' <<< "${COMMENT_BODY:-}"; then
+              exit 0
+            fi
+            feedback=${COMMENT_BODY:-}
+            author=${COMMENT_AUTHOR:-}
+            state=comment
+          else
+            pr=$PR_NUMBER
+            feedback=${REVIEW_BODY:-}
+            author=${REVIEW_AUTHOR:-}
+            state=changes_requested
+          fi
+          [[ -n $pr ]] || exit 0
+          if [[ $author == *"[bot]" ]]; then
+            echo "Ignoring feedback from ${author}; bot comments do not start a revision."
+            exit 0
+          fi
+
+          permission=$(gh api "repos/${REPO}/collaborators/${author}/permission" --jq .permission 2>/dev/null || echo none)
+          case "$permission" in
+            admin|maintain|write) ;;
+            *)
+              gh pr comment "$pr" --repo "$REPO" --body "Only a maintainer (write, maintain, or admin permission) can request a revision. @${author}, this request was ignored." >/dev/null
+              exit 0
+              ;;
+          esac
+
+          info=$(gh pr view "$pr" --repo "$REPO" --json headRefName,headRepository,baseRefName,labels,state)
+          head_ref=$(jq -r '.headRefName' <<< "$info")
+          head_repo=$(jq -r '.headRepository.nameWithOwner // empty' <<< "$info")
+          base_ref=$(jq -r '.baseRefName' <<< "$info")
+          labels=$(jq -r '.labels[].name' <<< "$info")
+          pr_state=$(jq -r '.state' <<< "$info")
+
+          if [[ $pr_state != OPEN ]]; then
+            exit 0
+          fi
+
+          if [[ $head_repo != "$REPO" ]]; then
+            gh pr comment "$pr" --repo "$REPO" --body "This pull request comes from a fork, so the factory cannot push a revision to it." >/dev/null
+            exit 0
+          fi
+          case "$head_ref" in
+            opsx/propose-*) scope=proposal ;;
+            opsx/impl-*) scope=implementation ;;
+            *) exit 0 ;;
+          esac
+          if [[ $base_ref != main ]]; then
+            exit 0
+          fi
+          if grep -qx 'opsx:revising' <<< "$labels"; then
+            gh pr comment "$pr" --repo "$REPO" --body "A revise run is already in progress on this pull request. This request was not started." >/dev/null
+            exit 0
+          fi
+
+          change=${head_ref#opsx/*-}
+          if [[ ! $change =~ ^gh([0-9]+)- ]]; then
+            echo "::error::cannot derive an issue number from ${head_ref}" >&2
+            exit 1
+          fi
+
+          feedback_hash=$(printf '%s\n%s\n%s\n' "$state" "$author" "$feedback" | sha256sum | cut -d' ' -f1)
+          marker="<!-- openspec-factory-revise:${feedback_hash} -->"
+          already=$(
+            {
+              gh api --paginate "repos/${REPO}/issues/${pr}/comments" --jq '.[].body' 2>/dev/null || true
+              gh api --paginate "repos/${REPO}/pulls/${pr}/reviews" --jq '.[].body' 2>/dev/null || true
+            } | grep -cF "$marker" || true
+          )
+          if (( already > 0 )); then
+            echo "This feedback was already addressed on #${pr}; skipping the duplicate."
+            exit 0
+          fi
+
+          gh pr edit "$pr" --repo "$REPO" --add-label opsx:revising >/dev/null
+          {
+            printf 'allowed=true\npr=%s\nchange=%s\nissue=%s\nscope=%s\nhead_ref=%s\n' \
+              "$pr" "$change" "${BASH_REMATCH[1]}" "$scope" "$head_ref"
+            printf 'feedback_b64=%s\n' "$(printf '%s' "$feedback" | base64 -w0)"
+            printf 'feedback_hash=%s\n' "$feedback_hash"
+            printf 'feedback_author=%s\nfeedback_state=%s\n' "$author" "$state"
+          } >> "$GITHUB_OUTPUT"
+
+  revise:
+    needs: guard
+    if: needs.guard.outputs.allowed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      actions: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: refs/pull/${{ needs.guard.outputs.pr }}/head
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build the agent context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ needs.guard.outputs.issue }}
+          CHANGE: ${{ needs.guard.outputs.change }}
+          PR: ${{ needs.guard.outputs.pr }}
+          SCOPE: ${{ needs.guard.outputs.scope }}
+          FEEDBACK_B64: ${{ needs.guard.outputs.feedback_b64 }}
+          FEEDBACK_AUTHOR: ${{ needs.guard.outputs.feedback_author }}
+          FEEDBACK_STATE: ${{ needs.guard.outputs.feedback_state }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          issue_json=$(gh issue view "$ISSUE" --repo "$REPO" --json title,body)
+          pr_json=$(gh pr view "$PR" --repo "$REPO" --json body,url)
+          feedback=$(printf '%s' "$FEEDBACK_B64" | base64 -d)
+
+          common=(
+            PHASE=revise
+            REPO="$REPO"
+            ISSUE_NUMBER="$ISSUE"
+            CHANGE_NAME="$CHANGE"
+            PR_NUMBER="$PR"
+            RUN_URL="$RUN_URL"
+          )
+          if [[ $SCOPE == proposal ]]; then
+            env "${common[@]}" \
+              ISSUE_TITLE="$(jq -r '.title' <<< "$issue_json")" \
+              ISSUE_BODY="$(jq -r '.body // ""' <<< "$issue_json")" \
+              PR_URL="$(jq -r '.url' <<< "$pr_json")" \
+              PR_BODY="$(jq -r '.body // ""' <<< "$pr_json")" \
+              REVIEW_BODY="$feedback" \
+              REVIEW_AUTHOR="$FEEDBACK_AUTHOR" \
+              REVIEW_STATE="$FEEDBACK_STATE" \
+              ./scripts/factory-context.sh
+          else
+            env "${common[@]}" \
+              ISSUE_TITLE="$(jq -r '.title' <<< "$issue_json")" \
+              ISSUE_BODY="$(jq -r '.body // ""' <<< "$issue_json")" \
+              PR_URL="$(jq -r '.url' <<< "$pr_json")" \
+              PR_BODY="$(jq -r '.body // ""' <<< "$pr_json")" \
+              COMMENT_BODY="$feedback" \
+              REVIEW_AUTHOR="$FEEDBACK_AUTHOR" \
+              REVIEW_STATE="$FEEDBACK_STATE" \
+              ./scripts/factory-context.sh
+          fi
+
+      - name: Run the revise agent
+        uses: ./.github/actions/openspec-agent
+        with:
+          agent: openspec-revise
+          tailscale-client-id: ${{ vars.TS_CLIENT_ID }}
+          tailscale-audience: ${{ vars.TS_AUDIENCE }}
+          timeout-minutes: "30"
+
+      - name: Publish the revision
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ needs.guard.outputs.issue }}
+          CHANGE: ${{ needs.guard.outputs.change }}
+          PR: ${{ needs.guard.outputs.pr }}
+          SCOPE: ${{ needs.guard.outputs.scope }}
+          HEAD_REF: ${{ needs.guard.outputs.head_ref }}
+          FEEDBACK_HASH: ${{ needs.guard.outputs.feedback_hash }}
+          EXPECTED_PHASE: revise
+          EXPECTED_CHANGE: ${{ needs.guard.outputs.change }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${GH_TOKEN}"
+
+          status=failed
+          summary="The revise agent did not produce a valid result."
+          blocked_reason="The result file was missing or invalid."
+          if ./scripts/factory-result.sh; then
+            status=$(jq -r '.status' .agent/result.json)
+            summary=$(jq -r '.summary' .agent/result.json)
+            blocked_reason=$(jq -r '.blocked_reason // ""' .agent/result.json)
+          else
+            printf '## Revision failed\n\n%s\n' "$summary" > .agent/report.md
+          fi
+
+          outcome=failed
+          if [[ $status == ok ]]; then
+            outcome=ok
+            mapfile -t changed < <({ git diff --name-only; git ls-files --others --exclude-standard; } | sort -u)
+            bad=()
+            for path in "${changed[@]:-}"; do
+              [[ -z $path ]] && continue
+              case "$path" in
+                .github/* | .opencode/* | .agents/* | .githooks/* | .git/*) bad+=("$path") ;;
+                *)
+                  if [[ $SCOPE == proposal && $path != "openspec/changes/${CHANGE}/"* && $path != .agent/* ]]; then
+                    bad+=("$path")
+                  fi
+                  ;;
+              esac
+            done
+            if (( ${#bad[@]} > 0 )); then
+              outcome=blocked
+              blocked_reason="The revise agent wrote outside its scope: ${bad[*]}"
+            elif (( ${#changed[@]} == 0 )); then
+              outcome=blocked
+              blocked_reason="The revise agent reported success but changed nothing."
+            else
+              if [[ $SCOPE == proposal ]]; then
+                openspec validate "$CHANGE" --strict || outcome=blocked
+                if [[ $outcome == blocked ]]; then
+                  blocked_reason="The revised change failed OpenSpec validation."
+                fi
+              else
+                just ci || outcome=blocked
+                if [[ $outcome == blocked ]]; then
+                  blocked_reason="\`just ci\` failed after the revision."
+                fi
+              fi
+            fi
+
+            if [[ $outcome == ok ]]; then
+              git config user.name "openspec-factory[bot]"
+              git config user.email "openspec-factory@users.noreply.github.com"
+              git add --all
+              git commit -m "${CHANGE}: revise ${SCOPE}"
+              git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${HEAD_REF}"
+
+              if [[ -s .agent/report.md ]]; then
+                {
+                  printf '<!-- openspec-factory-revise:%s -->\n\n' "$FEEDBACK_HASH"
+                  cat .agent/report.md
+                } > /tmp/revise-report.md
+                gh pr comment "$PR" --repo "$REPO" --body-file /tmp/revise-report.md >/dev/null
+              fi
+              if [[ $SCOPE == implementation ]]; then
+                gh workflow run openspec-verify.yml --repo "$REPO" --ref main -f pr="$PR" || true
+              fi
+            fi
+          fi
+
+          if [[ $outcome != ok ]]; then
+            {
+              printf '## Revise did not complete\n\n'
+              printf '%s\n\n' "${blocked_reason:-$summary}"
+              printf 'No commit was pushed. Address the cause, then comment `/revise` again\n'
+              printf 'or remove the requested-changes review and re-request it.\n'
+            } > /tmp/revise-blocked.md
+            gh pr comment "$PR" --repo "$REPO" --body-file /tmp/revise-blocked.md >/dev/null
+          fi
+
+          printf 'outcome=%s\n' "$outcome" >> "$GITHUB_OUTPUT"
+
+      - name: Report an unexpected failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.guard.outputs.pr }}
+        run: gh pr comment "$PR" --repo "$REPO" --body "The revise run failed before it could publish a result. See [the run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}). Comment \`/revise\` again to retry." >/dev/null
+
+      - name: Remove the running label
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.guard.outputs.pr }}
+        run: gh pr edit "$PR" --repo "$REPO" --remove-label opsx:revising >/dev/null 2>&1 || true

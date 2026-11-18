@@ -1,0 +1,6 @@
+# Backticks in workflow log messages are literal Markdown, not command
+# substitution. ShellCheck's SC2016 is a false positive for those strings.
+paths:
+  .github/workflows/**/*.{yml,yaml}:
+    ignore:
+      - 'shellcheck reported issue in this script: SC2016:'

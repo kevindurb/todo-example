@@ -1,0 +1,215 @@
+name: OpenSpec verify
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number
+        required: true
+        type: string
+
+concurrency:
+  group: factory-pr-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  verify:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      id-token: write
+    outputs:
+      pr: ${{ steps.guard.outputs.pr }}
+      change: ${{ steps.guard.outputs.change }}
+      issue: ${{ steps.guard.outputs.issue }}
+    steps:
+      - name: Identify the pull request
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          INPUT_PR: ${{ inputs.pr }}
+          CONTEXT_PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          pr=${CONTEXT_PR:-${INPUT_PR:-}}
+          if [[ $EVENT == workflow_dispatch ]]; then
+            [[ $pr =~ ^[0-9]+$ ]] || { echo "::error::pr input must be a number" >&2; exit 1; }
+          fi
+          [[ -n $pr ]] || { echo "::error::no pull request number" >&2; exit 1; }
+
+          info=$(gh pr view "$pr" --repo "$REPO" --json headRefName,headRepository,baseRefName,state)
+          head_ref=$(jq -r '.headRefName' <<< "$info")
+          head_repo=$(jq -r '.headRepository.nameWithOwner // empty' <<< "$info")
+          base_ref=$(jq -r '.baseRefName' <<< "$info")
+          pr_state=$(jq -r '.state' <<< "$info")
+
+          if [[ $pr_state != OPEN ]]; then
+            echo "Skipping #${pr}: the pull request is ${pr_state}."
+            printf 'allowed=false\npr=%s\n' "$pr" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ $head_repo != "$REPO" ]]; then
+            echo "Skipping #${pr}: fork pull requests are not verified."
+            printf 'allowed=false\npr=%s\n' "$pr" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$head_ref" in
+            opsx/impl-*) ;;
+            *)
+              echo "Skipping #${pr}: verify only runs on implementation PRs."
+              printf 'allowed=false\npr=%s\n' "$pr" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          if [[ $base_ref != main ]]; then
+            echo "Skipping #${pr}: the base branch is ${base_ref}, not main."
+            printf 'allowed=false\npr=%s\n' "$pr" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          change=${head_ref#opsx/impl-}
+          if [[ ! $change =~ ^gh([0-9]+)- ]]; then
+            echo "::error::cannot derive an issue number from ${head_ref}" >&2
+            exit 1
+          fi
+          printf 'allowed=true\npr=%s\nchange=%s\nissue=%s\n' "$pr" "$change" "${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+
+      - name: Mark the PR as verifying
+        if: steps.guard.outputs.allowed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.guard.outputs.pr }}
+        run: gh pr edit "$PR" --repo "$REPO" --add-label opsx:verifying >/dev/null
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: steps.guard.outputs.allowed == 'true'
+        with:
+          ref: refs/pull/${{ steps.guard.outputs.pr }}/head
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build the verification context
+        if: steps.guard.outputs.allowed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ steps.guard.outputs.issue }}
+          CHANGE: ${{ steps.guard.outputs.change }}
+          PR: ${{ steps.guard.outputs.pr }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          issue_json=$(gh issue view "$ISSUE" --repo "$REPO" --json title,body)
+          pr_json=$(gh pr view "$PR" --repo "$REPO" --json title,body,url)
+          git fetch --no-tags origin main >/dev/null
+          changed=$(git diff --name-only origin/main...HEAD | sed 's/^/- `/; s/$/`/')
+
+          PHASE=verify \
+            REPO="$REPO" \
+            ISSUE_NUMBER="$ISSUE" \
+            ISSUE_TITLE="$(jq -r '.title' <<< "$issue_json")" \
+            ISSUE_BODY="$(jq -r '.body // ""' <<< "$issue_json")" \
+            CHANGE_NAME="$CHANGE" \
+            PR_NUMBER="$PR" \
+            PR_URL="$(jq -r '.url' <<< "$pr_json")" \
+            PR_BODY="$(jq -r '.body // ""' <<< "$pr_json")" \
+            CHANGED_FILES="$changed" \
+            RUN_URL="$RUN_URL" \
+            ./scripts/factory-context.sh
+
+      - name: Run the verify agent
+        if: steps.guard.outputs.allowed == 'true'
+        uses: ./.github/actions/openspec-agent
+        with:
+          agent: openspec-verify
+          tailscale-client-id: ${{ vars.TS_CLIENT_ID }}
+          tailscale-audience: ${{ vars.TS_AUDIENCE }}
+          timeout-minutes: "15"
+
+      - name: Publish the advisory review
+        if: steps.guard.outputs.allowed == 'true'
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.guard.outputs.pr }}
+          CHANGE: ${{ steps.guard.outputs.change }}
+          EXPECTED_PHASE: verify
+          EXPECTED_CHANGE: ${{ steps.guard.outputs.change }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${GH_TOKEN}"
+
+          status=failed
+          summary="The verify agent did not produce a valid result."
+          blocked_reason="The result file was missing or invalid."
+          if ./scripts/factory-result.sh; then
+            status=$(jq -r '.status' .agent/result.json)
+            summary=$(jq -r '.summary' .agent/result.json)
+            blocked_reason=$(jq -r '.blocked_reason // ""' .agent/result.json)
+          else
+            printf '## Verification failed\n\n%s\n\nThis is advisory only. CI remains the test gate.\n' "$summary" > .agent/report.md
+          fi
+
+          if [[ $status == ok ]]; then
+            head_sha=$(git rev-parse HEAD)
+            marker="<!-- openspec-factory-verify:${head_sha} -->"
+            already=$(
+              {
+                gh api --paginate "repos/${REPO}/issues/${PR}/comments" --jq '.[].body' 2>/dev/null || true
+                gh api --paginate "repos/${REPO}/pulls/${PR}/reviews" --jq '.[].body' 2>/dev/null || true
+              } | grep -cF "$marker" || true
+            )
+            if (( already > 0 )); then
+              echo "Verification already posted for ${head_sha}; skipping the duplicate."
+            else
+              {
+                printf '%s\n\n' "$marker"
+                cat .agent/report.md
+              } > /tmp/verify-body.md
+              # A comment-only review never approves or requests changes. Fall back
+              # to a plain comment if GitHub refuses a review from the PR author.
+              if ! gh pr review "$PR" --repo "$REPO" --comment --body-file /tmp/verify-body.md; then
+                gh pr comment "$PR" --repo "$REPO" --body-file /tmp/verify-body.md >/dev/null
+              fi
+            fi
+          else
+            {
+              printf '## Verification did not complete\n\n'
+              printf '%s\n\n' "${blocked_reason:-$summary}"
+              printf 'This is advisory only. CI remains the test gate.\n'
+            } > /tmp/verify-blocked.md
+            gh pr comment "$PR" --repo "$REPO" --body-file /tmp/verify-blocked.md >/dev/null
+          fi
+
+      - name: Report an unexpected failure
+        if: failure() && steps.guard.outputs.allowed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.guard.outputs.pr }}
+        run: |
+          gh pr comment "$PR" --repo "$REPO" --body "The verify run failed before it could publish a result. See [the run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}). This is advisory only; CI remains the test gate." >/dev/null
+
+      - name: Remove the running label
+        if: always() && steps.guard.outputs.allowed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.guard.outputs.pr }}
+        run: gh pr edit "$PR" --repo "$REPO" --remove-label opsx:verifying >/dev/null 2>&1 || true

@@ -1,0 +1,70 @@
+name: Change
+description: Request one OpenSpec change for the GitHub-native factory
+title: "[change] "
+labels: ["opsx:triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is the control plane for one change. A maintainer applies
+        `opsx:propose` to start planning; the factory then opens a proposal PR,
+        an implementation PR, and an archive PR. Keep this issue to one
+        cohesive change. Split anything larger before applying a command label.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is wrong today, and who is affected?
+      placeholder: Describe the current behavior and why it matters.
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: What should be true when the change is archived?
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-goals
+      description: What is in scope, and what is deliberately excluded?
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: How will a reviewer know the change is correct?
+      placeholder: |
+        - ...
+        - ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: size
+    attributes:
+      label: Size
+      description: The factory stops a proposal that needs more than one change.
+      options:
+        - One cohesive change
+        - Unsure; needs maintainer triage
+        - Several changes (please split before proposing)
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: This issue describes one cohesive change.
+          required: true
+        - label: I understand that maintainers merge every PR and start every phase.
+          required: true

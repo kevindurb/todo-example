@@ -1,0 +1,86 @@
+name: OpenSpec lifecycle
+
+on:
+  pull_request:
+    types: [closed]
+
+concurrency:
+  group: factory-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  advance:
+    if: >
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Advance the issue lifecycle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+
+          phase=""
+          case "$HEAD_REF" in
+            opsx/propose-*) phase=proposal ;;
+            opsx/impl-*) phase=implementation ;;
+            opsx/archive-*) phase=archive ;;
+            *) exit 0 ;;
+          esac
+
+          change=${HEAD_REF#opsx/*-}
+          if [[ ! $change =~ ^gh([0-9]+)- ]]; then
+            echo "::error::cannot derive an issue number from ${HEAD_REF}" >&2
+            exit 1
+          fi
+          issue=${BASH_REMATCH[1]}
+
+          proposal=$(gh pr list --repo "$REPO" --state merged --head "opsx/propose-${change}" --json number --jq '.[0].number // empty')
+          impl=$(gh pr list --repo "$REPO" --state merged --head "opsx/impl-${change}" --json number --jq '.[0].number // empty')
+          archive=$(gh pr list --repo "$REPO" --state merged --head "opsx/archive-${change}" --json number --jq '.[0].number // empty')
+
+          case "$phase" in
+            proposal)
+              gh issue edit "$issue" --repo "$REPO" \
+                --remove-label opsx:proposal-review \
+                --remove-label opsx:blocked \
+                --add-label opsx:proposal-approved >/dev/null 2>&1 || true
+              REPO="$REPO" ISSUE_NUMBER="$issue" CHANGE_NAME="$change" \
+                STATE=opsx:proposal-approved PROPOSAL_PR="$proposal" IMPL_PR="$impl" ARCHIVE_PR="$archive" \
+                NEXT_ACTION="Apply \`opsx:implement\` to build the approved change." \
+                ./scripts/factory-status.sh
+              ;;
+            implementation)
+              gh issue edit "$issue" --repo "$REPO" \
+                --remove-label opsx:impl-review \
+                --remove-label opsx:blocked \
+                --add-label opsx:impl-approved >/dev/null 2>&1 || true
+              REPO="$REPO" ISSUE_NUMBER="$issue" CHANGE_NAME="$change" \
+                STATE=opsx:impl-approved PROPOSAL_PR="$proposal" IMPL_PR="$impl" ARCHIVE_PR="$archive" \
+                NEXT_ACTION="Apply \`opsx:archive\` to archive the change and sync its specs." \
+                ./scripts/factory-status.sh
+              ;;
+            archive)
+              gh issue edit "$issue" --repo "$REPO" \
+                --remove-label opsx:archive-review \
+                --remove-label opsx:blocked \
+                --add-label opsx:done >/dev/null 2>&1 || true
+              REPO="$REPO" ISSUE_NUMBER="$issue" CHANGE_NAME="$change" \
+                STATE=opsx:done PROPOSAL_PR="$proposal" IMPL_PR="$impl" ARCHIVE_PR="$archive" \
+                NEXT_ACTION="None. The change is archived and the issue is complete." \
+                ./scripts/factory-status.sh
+              ;;
+          esac

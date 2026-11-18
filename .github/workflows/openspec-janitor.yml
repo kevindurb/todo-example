@@ -1,0 +1,59 @@
+name: OpenSpec janitor
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove stale running labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          stale_before=$(date -u -d '90 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+          swept=0
+
+          sweep_issue() {
+            local label=$1 command=$2
+            local number updated
+            while read -r number updated; do
+              [[ $updated < $stale_before ]] || continue
+              gh issue edit "$number" --repo "$REPO" --remove-label "$label" >/dev/null 2>&1 || true
+              gh issue edit "$number" --repo "$REPO" --add-label opsx:blocked >/dev/null 2>&1 || true
+              gh issue comment "$number" --repo "$REPO" --body "Removed stale \`${label}\`; no run has updated this issue since ${updated}. Remove \`opsx:blocked\` and re-apply \`${command}\` to retry." >/dev/null
+              echo "swept issue #${number} (${label})"
+              swept=$((swept + 1))
+            done < <(gh issue list --repo "$REPO" --state open --label "$label" --limit 100 \
+              --json number,updatedAt --jq '.[] | "\(.number) \(.updatedAt)"')
+          }
+
+          sweep_pull() {
+            local label=$1 retry=$2
+            local number updated
+            while read -r number updated; do
+              [[ $updated < $stale_before ]] || continue
+              gh pr edit "$number" --repo "$REPO" --remove-label "$label" >/dev/null 2>&1 || true
+              gh pr comment "$number" --repo "$REPO" --body "Removed stale \`${label}\`; no run has updated this pull request since ${updated}. ${retry}" >/dev/null
+              echo "swept PR #${number} (${label})"
+              swept=$((swept + 1))
+            done < <(gh pr list --repo "$REPO" --state open --label "$label" --limit 100 \
+              --json number,updatedAt --jq '.[] | "\(.number) \(.updatedAt)"')
+          }
+
+          sweep_issue opsx:proposing opsx:propose
+          sweep_issue opsx:implementing opsx:implement
+          sweep_issue opsx:archiving opsx:archive
+          sweep_pull opsx:verifying 'Push a new commit or re-run the `OpenSpec verify` workflow.'
+          sweep_pull opsx:revising 'Comment `/revise` again.'
+
+          echo "janitor: ${swept} stale overlay(s) removed (cutoff ${stale_before})"

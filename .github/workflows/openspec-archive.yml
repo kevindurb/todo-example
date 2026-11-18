@@ -1,0 +1,237 @@
+name: OpenSpec archive
+
+on:
+  issues:
+    types: [labeled]
+
+concurrency:
+  group: factory-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  guard:
+    if: github.event.label.name == 'opsx:archive' && github.event.issue.state == 'open'
+    runs-on: ubuntu-latest
+    outputs:
+      allowed: ${{ steps.check.outputs.allowed }}
+      change: ${{ steps.check.outputs.change }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check the request
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          ACTOR: ${{ github.event.sender.login }}
+        run: |
+          set -euo pipefail
+          allowed=false
+          change=""
+
+          finish() {
+            gh issue edit "$ISSUE" --repo "$REPO" --remove-label opsx:archive --remove-label opsx:archiving >/dev/null 2>&1 || true
+            printf 'allowed=%s\nchange=%s\n' "$allowed" "$change" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          block() {
+            gh issue edit "$ISSUE" --repo "$REPO" --add-label opsx:blocked >/dev/null 2>&1 || true
+            gh issue comment "$ISSUE" --repo "$REPO" --body "$1" >/dev/null
+            finish
+          }
+
+          permission=$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" --jq .permission 2>/dev/null || echo none)
+          case "$permission" in
+            admin|maintain|write) ;;
+            *)
+              block "Only a maintainer (write, maintain, or admin permission) can start a phase. @${ACTOR}, this command was ignored."
+              ;;
+          esac
+
+          labels=$(gh issue view "$ISSUE" --repo "$REPO" --json labels --jq '.labels[].name')
+          if ! grep -qx 'opsx:impl-approved' <<< "$labels"; then
+            block "The implementation gate is not approved. Merge the implementation PR first; the lifecycle label must be \`opsx:impl-approved\`."
+          fi
+
+          archived=$(find openspec/changes/archive -mindepth 1 -maxdepth 1 -type d \
+            \( -name "gh${ISSUE}-*" -o -name "*-gh${ISSUE}-*" \) -printf '%f\n' 2>/dev/null | head -1 || true)
+          if [[ -n $archived ]]; then
+            gh issue comment "$ISSUE" --repo "$REPO" --body "This change is already archived at \`openspec/changes/archive/${archived}/\`. No duplicate archive PR was created." >/dev/null
+            finish
+          fi
+
+          mapfile -t active < <(find openspec/changes -mindepth 1 -maxdepth 1 -type d -name "gh${ISSUE}-*" -printf '%f\n' 2>/dev/null || true)
+          if (( ${#active[@]} == 0 )); then
+            block "No active change named \`gh${ISSUE}-<slug>\` exists on \`main\`."
+          fi
+          if (( ${#active[@]} > 1 )); then
+            block "More than one active change matches this issue: ${active[*]}. Archive the extras deliberately before retrying."
+          fi
+          change=${active[0]}
+
+          merged_impl=$(gh pr list --repo "$REPO" --state merged --json number,url,headRefName \
+            --jq ".[] | select(.headRefName == \"opsx/impl-${change}\") | \"#\(.number) \(.url)\"" 2>/dev/null | head -1 || true)
+          if [[ -z $merged_impl ]]; then
+            block "No merged implementation PR was found for \`${change}\`. Merge the implementation PR before archiving."
+          fi
+
+          open_archive=$(gh pr list --repo "$REPO" --state open --json number,url,headRefName \
+            --jq ".[] | select(.headRefName == \"opsx/archive-${change}\") | \"#\(.number) \(.url)\"" 2>/dev/null | head -1 || true)
+          if [[ -n $open_archive ]]; then
+            gh issue comment "$ISSUE" --repo "$REPO" --body "An archive PR is already open for \`${change}\`: ${open_archive}. No duplicate was created." >/dev/null
+            finish
+          fi
+
+          gh issue edit "$ISSUE" --repo "$REPO" \
+            --remove-label opsx:archive \
+            --remove-label opsx:blocked >/dev/null 2>&1 || true
+          gh issue edit "$ISSUE" --repo "$REPO" --add-label opsx:archiving >/dev/null
+          printf 'allowed=true\nchange=%s\n' "$change" >> "$GITHUB_OUTPUT"
+
+  archive:
+    needs: guard
+    if: needs.guard.outputs.allowed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reuse an existing archive branch
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CHANGE: ${{ needs.guard.outputs.change }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${GH_TOKEN}"
+          branch="opsx/archive-${CHANGE}"
+          reuse=false
+          if git ls-remote --exit-code --heads "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "refs/heads/${branch}" >/dev/null 2>&1; then
+            git fetch --no-tags "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "refs/heads/${branch}"
+            git checkout -B "$branch" FETCH_HEAD
+            reuse=true
+            echo "Reusing existing archive branch ${branch}"
+          fi
+          echo "reuse=${reuse}" >> "$GITHUB_OUTPUT"
+
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "24"
+      - name: Install OpenSpec
+        run: npm install --global @fission-ai/openspec@2
+
+      - name: Archive and validate
+        id: package
+        env:
+          CHANGE: ${{ needs.guard.outputs.change }}
+          REUSE: ${{ steps.reuse.outputs.reuse }}
+        run: |
+          set -euo pipefail
+          if [[ $REUSE != true ]]; then
+            test -d "openspec/changes/${CHANGE}"
+            openspec archive "$CHANGE" --yes
+          fi
+          archived_dir=$(find openspec/changes/archive -mindepth 1 -maxdepth 1 -type d \
+            \( -name "$CHANGE" -o -name "*-$CHANGE" \) -printf '%f\n' | head -1)
+          test -n "$archived_dir"
+          echo "archived_dir=${archived_dir}" >> "$GITHUB_OUTPUT"
+          openspec validate --all --strict
+          openspec validate --archived --strict
+
+      - name: Publish the archive
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          CHANGE: ${{ needs.guard.outputs.change }}
+          ARCHIVED_DIR: ${{ steps.package.outputs.archived_dir }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${GH_TOKEN}"
+          branch="opsx/archive-${CHANGE}"
+
+          git config user.name "openspec-factory[bot]"
+          git config user.email "openspec-factory@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add --all
+          if ! git diff --cached --quiet; then
+            git commit -m "${CHANGE}: archive and sync specs"
+          fi
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${branch}"
+
+          {
+            printf 'Closes #%s\n\n' "$ISSUE"
+            printf '## Archive `%s`\n\n' "$CHANGE"
+            printf 'The change moved to `openspec/changes/archive/%s/` and its specs were\n' "$ARCHIVED_DIR"
+            printf 'synced into `openspec/specs/`.\n\n'
+            printf 'This is the only pull request for the change that closes the issue.\n'
+          } > /tmp/archive-body.md
+
+          pr=$(gh pr list --repo "$REPO" --state open --head "$branch" --json number --jq '.[0].number // empty')
+          if [[ -n $pr ]]; then
+            gh pr edit "$pr" --repo "$REPO" --body-file /tmp/archive-body.md
+          else
+            pr=$(gh pr create --repo "$REPO" --base main --head "$branch" \
+              --title "${CHANGE}: archive" --body-file /tmp/archive-body.md)
+            pr=${pr##*/}
+          fi
+
+          gh issue edit "$ISSUE" --repo "$REPO" \
+            --remove-label opsx:impl-approved \
+            --remove-label opsx:impl-review \
+            --remove-label opsx:blocked \
+            --add-label opsx:archive-review >/dev/null 2>&1 || true
+
+          proposal=$(gh pr list --repo "$REPO" --state merged --head "opsx/propose-${CHANGE}" --json number --jq '.[0].number // empty')
+          impl=$(gh pr list --repo "$REPO" --state merged --head "opsx/impl-${CHANGE}" --json number --jq '.[0].number // empty')
+          REPO="$REPO" ISSUE_NUMBER="$ISSUE" CHANGE_NAME="$CHANGE" \
+            STATE=opsx:archive-review PROPOSAL_PR="$proposal" IMPL_PR="$impl" ARCHIVE_PR="$pr" RUN_URL="$RUN_URL" \
+            NEXT_ACTION="Review and merge archive PR #${pr}. Merging closes issue #${ISSUE}." \
+            ./scripts/factory-status.sh
+
+          printf 'pr=%s\n' "$pr" >> "$GITHUB_OUTPUT"
+
+      - name: Report a packaging failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          CHANGE: ${{ needs.guard.outputs.change }}
+        run: |
+          set -euo pipefail
+          reason="The archive run failed while moving or validating the change, so no archive PR was opened."
+          gh issue edit "$ISSUE" --repo "$REPO" --add-label opsx:blocked >/dev/null 2>&1 || true
+          gh issue comment "$ISSUE" --repo "$REPO" --body "${reason} See [the run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}). Remove \`opsx:blocked\` and re-apply \`opsx:archive\` after fixing the cause." >/dev/null
+          REPO="$REPO" ISSUE_NUMBER="$ISSUE" CHANGE_NAME="$CHANGE" \
+            STATE=opsx:blocked BLOCKED_REASON="$reason" \
+            RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            NEXT_ACTION="Fix the archive or validation failure, then remove opsx:blocked and re-apply opsx:archive." \
+            ./scripts/factory-status.sh || true
+
+      - name: Remove the running label
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: gh issue edit "$ISSUE" --repo "$REPO" --remove-label opsx:archiving >/dev/null 2>&1 || true

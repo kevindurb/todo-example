@@ -1,0 +1,300 @@
+name: OpenSpec apply
+
+on:
+  issues:
+    types: [labeled]
+
+concurrency:
+  group: factory-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  guard:
+    if: github.event.label.name == 'opsx:implement' && github.event.issue.state == 'open'
+    runs-on: ubuntu-latest
+    outputs:
+      allowed: ${{ steps.check.outputs.allowed }}
+      change: ${{ steps.check.outputs.change }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check the request
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          ACTOR: ${{ github.event.sender.login }}
+        run: |
+          set -euo pipefail
+          allowed=false
+          change=""
+
+          block() {
+            gh issue edit "$ISSUE" --repo "$REPO" --remove-label opsx:implement --remove-label opsx:implementing >/dev/null 2>&1 || true
+            gh issue edit "$ISSUE" --repo "$REPO" --add-label opsx:blocked >/dev/null 2>&1 || true
+            gh issue comment "$ISSUE" --repo "$REPO" --body "$1" >/dev/null
+            printf 'allowed=%s\nchange=%s\n' "$allowed" "$change" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          permission=$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" --jq .permission 2>/dev/null || echo none)
+          case "$permission" in
+            admin|maintain|write) ;;
+            *)
+              block "Only a maintainer (write, maintain, or admin permission) can start a phase. @${ACTOR}, this command was ignored."
+              ;;
+          esac
+
+          labels=$(gh issue view "$ISSUE" --repo "$REPO" --json labels --jq '.labels[].name')
+          if ! grep -qx 'opsx:proposal-approved' <<< "$labels"; then
+            block "The proposal gate is not approved. Merge the proposal PR first; the lifecycle label must be \`opsx:proposal-approved\`."
+          fi
+
+          mapfile -t active < <(find openspec/changes -mindepth 1 -maxdepth 1 -type d -name "gh${ISSUE}-*" -printf '%f\n' 2>/dev/null || true)
+          if (( ${#active[@]} == 0 )); then
+            block "No active change named \`gh${ISSUE}-<slug>\` exists on \`main\`. Merge the proposal PR first."
+          fi
+          if (( ${#active[@]} > 1 )); then
+            block "More than one active change matches this issue: ${active[*]}. Close or archive the extras before implementing."
+          fi
+          change=${active[0]}
+
+          open_pr=$(gh pr list --repo "$REPO" --state open --json number,url,headRefName \
+            --jq ".[] | select(.headRefName == \"opsx/impl-${change}\") | \"#\(.number) \(.url)\"" 2>/dev/null | head -1 || true)
+          if [[ -n $open_pr ]]; then
+            block "An implementation PR is already open for \`${change}\`: ${open_pr}. No duplicate run was started. Use \`/revise\` on that PR to request changes."
+          fi
+
+          gh issue edit "$ISSUE" --repo "$REPO" \
+            --remove-label opsx:implement \
+            --remove-label opsx:blocked >/dev/null 2>&1 || true
+          gh issue edit "$ISSUE" --repo "$REPO" --add-label opsx:implementing >/dev/null
+          printf 'allowed=true\nchange=%s\n' "$change" >> "$GITHUB_OUTPUT"
+
+  apply:
+    needs: guard
+    if: needs.guard.outputs.allowed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      actions: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Continue an existing implementation branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CHANGE: ${{ needs.guard.outputs.change }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${GH_TOKEN}"
+          branch="opsx/impl-${CHANGE}"
+          if git ls-remote --exit-code --heads "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "refs/heads/${branch}" >/dev/null 2>&1; then
+            git fetch --no-tags "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "refs/heads/${branch}"
+            git checkout -B "$branch" FETCH_HEAD
+            echo "Continuing existing branch ${branch}"
+          fi
+
+      - name: Build the agent context
+        env:
+          PHASE: apply
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          CHANGE_NAME: ${{ needs.guard.outputs.change }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: ./scripts/factory-context.sh
+
+      - name: Run the apply agent
+        uses: ./.github/actions/openspec-agent
+        with:
+          agent: openspec-apply
+          tailscale-client-id: ${{ vars.TS_CLIENT_ID }}
+          tailscale-audience: ${{ vars.TS_AUDIENCE }}
+          timeout-minutes: "35"
+
+      - name: Publish the implementation
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          CHANGE: ${{ needs.guard.outputs.change }}
+          EXPECTED_PHASE: apply
+          EXPECTED_CHANGE: ${{ needs.guard.outputs.change }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${GH_TOKEN}"
+
+          status=failed
+          summary="The apply agent did not produce a valid result."
+          blocked_reason="The result file was missing or invalid."
+          if ./scripts/factory-result.sh; then
+            status=$(jq -r '.status' .agent/result.json)
+            summary=$(jq -r '.summary' .agent/result.json)
+            blocked_reason=$(jq -r '.blocked_reason // ""' .agent/result.json)
+          else
+            printf '## Apply failed\n\n%s\n' "$summary" > .agent/report.md
+          fi
+
+          outcome=blocked
+          pr=""
+          blocked_reason_display="$blocked_reason"
+
+          if [[ $status == ok ]]; then
+            before=$(grep -c '^- \[ \]' "openspec/changes/${CHANGE}/tasks.md" 2>/dev/null || true)
+            after=$(grep -c '^- \[ \]' "openspec/changes/${CHANGE}/tasks.md" 2>/dev/null || true)
+            if (( before == 0 )); then
+              outcome=blocked
+              blocked_reason_display="The change has no pending tasks. Archive it instead of applying it again."
+            elif (( after >= before )); then
+              outcome=blocked
+              blocked_reason_display="The apply agent did not check any task in tasks.md."
+            fi
+
+            mapfile -t changed < <({ git diff --name-only; git ls-files --others --exclude-standard; } | sort -u)
+            control=()
+            for path in "${changed[@]:-}"; do
+              [[ -z $path ]] && continue
+              case "$path" in
+                .github/* | .opencode/* | .agents/* | .githooks/* | .git/*) control+=("$path") ;;
+              esac
+            done
+            if (( ${#control[@]} > 0 )); then
+              outcome=blocked
+              blocked_reason_display="The apply agent edited the factory control plane: ${control[*]}. Report this as blocked and let a human make the change."
+            fi
+
+            if [[ ! -d "openspec/changes/${CHANGE}" ]]; then
+              outcome=blocked
+              blocked_reason_display="The active change directory disappeared during the apply run."
+            fi
+
+            if [[ $outcome != blocked ]]; then
+              if ! openspec validate "$CHANGE" --strict; then
+                outcome=blocked
+                blocked_reason_display="The change failed OpenSpec validation after the apply run."
+              fi
+            fi
+
+            branch="opsx/impl-${CHANGE}"
+            if [[ $outcome != blocked ]]; then
+              git config user.name "openspec-factory[bot]"
+              git config user.email "openspec-factory@users.noreply.github.com"
+              git checkout -B "$branch"
+              git add --all
+              if git diff --cached --quiet; then
+                outcome=blocked
+                blocked_reason_display="The apply agent reported success but produced no commit."
+              else
+                git commit -m "${CHANGE}: implement"
+                git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${branch}"
+              fi
+            fi
+
+            if [[ $outcome != blocked ]]; then
+              if ! just ci; then
+                outcome=blocked
+                blocked_reason_display="\`just ci\` failed. The branch \`${branch}\` was pushed for recovery, but no PR was opened or updated."
+              fi
+            fi
+
+            if [[ $outcome != blocked ]]; then
+              outcome=ok
+            fi
+
+            if [[ $outcome == ok ]]; then
+              {
+                printf 'Refs #%s\n\n' "$ISSUE"
+                printf '## Implementation for `%s`\n\n' "$CHANGE"
+                printf 'The change stays active until the archive PR merges. Only the archive\n'
+                printf 'PR closes the issue.\n\n'
+                sed -E 's/\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b/reference/Ig' .agent/report.md
+              } > /tmp/impl-body.md
+
+              pr=$(gh pr list --repo "$REPO" --state open --head "$branch" --json number --jq '.[0].number // empty')
+              if [[ -n $pr ]]; then
+                gh pr edit "$pr" --repo "$REPO" --body-file /tmp/impl-body.md
+                gh pr ready "$pr" --repo "$REPO" >/dev/null 2>&1 || true
+              else
+                pr=$(gh pr create --repo "$REPO" --base main --head "$branch" \
+                  --title "${CHANGE}: implementation" --body-file /tmp/impl-body.md)
+                pr=${pr##*/}
+              fi
+
+              gh issue edit "$ISSUE" --repo "$REPO" \
+                --remove-label opsx:proposal-approved \
+                --remove-label opsx:proposal-review \
+                --remove-label opsx:blocked \
+                --add-label opsx:impl-review >/dev/null 2>&1 || true
+
+              proposal=$(gh pr list --repo "$REPO" --state merged --head "opsx/propose-${CHANGE}" --json number --jq '.[0].number // empty')
+              REPO="$REPO" ISSUE_NUMBER="$ISSUE" CHANGE_NAME="$CHANGE" \
+                STATE=opsx:impl-review PROPOSAL_PR="$proposal" IMPL_PR="$pr" RUN_URL="$RUN_URL" \
+                NEXT_ACTION="Review and merge implementation PR #${pr}, then apply opsx:archive." \
+                ./scripts/factory-status.sh
+
+              gh workflow run openspec-verify.yml --repo "$REPO" --ref main -f pr="$pr" || true
+            fi
+          fi
+
+          if [[ $outcome != ok ]]; then
+            gh issue edit "$ISSUE" --repo "$REPO" --add-label opsx:blocked >/dev/null 2>&1 || true
+            {
+              printf '## Apply blocked\n\n'
+              printf '%s\n\n' "${blocked_reason_display:-$summary}"
+              printf 'Remove `opsx:blocked` and re-apply `opsx:implement` to retry.\n'
+            } > /tmp/impl-blocked.md
+            gh issue comment "$ISSUE" --repo "$REPO" --body-file /tmp/impl-blocked.md >/dev/null
+            REPO="$REPO" ISSUE_NUMBER="$ISSUE" CHANGE_NAME="$CHANGE" \
+              STATE=opsx:blocked BLOCKED_REASON="${blocked_reason_display:-$summary}" \
+              RUN_URL="$RUN_URL" \
+              NEXT_ACTION="Read the blocking reason, then remove opsx:blocked and re-apply opsx:implement." \
+              ./scripts/factory-status.sh || true
+          fi
+
+          printf 'outcome=%s\npr=%s\n' "$outcome" "$pr" >> "$GITHUB_OUTPUT"
+
+      - name: Report an unexpected failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          CHANGE: ${{ needs.guard.outputs.change }}
+        run: |
+          set -euo pipefail
+          reason="The apply run failed before it could publish a result."
+          gh issue edit "$ISSUE" --repo "$REPO" --add-label opsx:blocked >/dev/null 2>&1 || true
+          gh issue comment "$ISSUE" --repo "$REPO" --body "${reason} See [the run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}), remove \`opsx:blocked\`, and re-apply \`opsx:implement\`." >/dev/null
+          REPO="$REPO" ISSUE_NUMBER="$ISSUE" CHANGE_NAME="$CHANGE" \
+            STATE=opsx:blocked BLOCKED_REASON="$reason" \
+            RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            NEXT_ACTION="Read the run log, then remove opsx:blocked and re-apply opsx:implement." \
+            ./scripts/factory-status.sh || true
+
+      - name: Remove the running label
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: gh issue edit "$ISSUE" --repo "$REPO" --remove-label opsx:implementing >/dev/null 2>&1 || true
