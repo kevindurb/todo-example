@@ -123,6 +123,11 @@ The factory SHALL mark a failed or blocked phase with `opsx:blocked`, post the r
 - **WHEN** an agent cannot complete its phase
 - **THEN** the factory posts the blocking reason and adds `opsx:blocked`
 
+#### Scenario: Work in progress is preserved
+
+- **WHEN** a phase blocks after the agent produced non-control-plane changes, whether the agent reported `blocked` or the workflow rejected an `ok` result
+- **THEN** the factory pushes the phase branch so the work survives the failed run
+
 #### Scenario: Retry
 
 - **WHEN** a maintainer removes `opsx:blocked` and re-applies the command label
@@ -179,14 +184,19 @@ The factory SHALL maintain one status comment on the issue with links to the thr
 - **WHEN** the lifecycle state changes
 - **THEN** the status comment is created or updated with the current links, state, and next action
 
-### Requirement: Runs for one issue are serialized
+### Requirement: Runs for one issue and phase are serialized
 
-The factory SHALL serialize phase runs for the same issue or pull request and SHALL NOT cancel an in-flight run.
+The factory SHALL serialize runs of the same phase for the same issue or pull request and SHALL NOT cancel an in-flight run. A command for a different phase is admitted or rejected by its lifecycle guard; skipped runs for other phases SHALL NOT cancel the matching run.
 
 #### Scenario: Duplicate command
 
-- **WHEN** a second command is applied while a phase for the same issue is running
+- **WHEN** a second command of the same phase is applied while that phase is running
 - **THEN** the second run waits or exits without starting a duplicate phase
+
+#### Scenario: Different phase command
+
+- **WHEN** a command label triggers the propose, apply, and archive workflows
+- **THEN** only the matching phase runs; the other runs are skipped and do not cancel it
 
 ### Requirement: Verification is advisory
 

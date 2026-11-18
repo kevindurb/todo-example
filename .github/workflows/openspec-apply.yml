@@ -267,8 +267,14 @@ jobs:
           fi
 
           if [[ $outcome != ok ]]; then
-            if [[ $status == blocked && -d "openspec/changes/${CHANGE}" ]]; then
+            # Preserve whatever the agent produced, even when the agent
+            # reported ok but this workflow blocked the run (a stale task
+            # list, a validation failure, or a failed just ci). Losing the
+            # work forces a human to redo the whole phase.
+            if [[ -d "openspec/changes/${CHANGE}" ]]; then
               mapfile -t blocked_changed < <({ git diff --name-only; git ls-files --others --exclude-standard; } | sort -u)
+              printf 'changed files on block: %s\n' "${#blocked_changed[@]}" >&2
+              printf '%s\n' "${blocked_changed[@]:-}" >&2
               blocked_control=()
               for path in "${blocked_changed[@]:-}"; do
                 [[ -z $path ]] && continue
