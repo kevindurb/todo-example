@@ -24,3 +24,10 @@ secrets.yml
 .opencode/package.json
 .opencode/package-lock.json
 .opencode/bun.lock
+
+# Build output and local data
+bin/
+data/
+*.db
+*.db-wal
+*.db-shm

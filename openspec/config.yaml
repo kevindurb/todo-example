@@ -2,7 +2,21 @@ schema: spec-driven
 
 # Shown to AI when creating artifacts.
 context: |
-  TODO: replace this block when you start the project.
-  Cover the tech stack, what the project is, the real `just` commands, and the
-  conventions an agent must follow. Keep it short — detail belongs in
-  .agents/skills/.
+  todo-example is a single-user todo app: one Go binary, net/http plus
+  html/template for server-rendered pages with no client-side JavaScript, and
+  SQLite through the pure-Go modernc.org/sqlite driver. It has no accounts,
+  JSON API, or multi-replica support, and is meant to run behind a private
+  network or authenticating proxy.
+
+  Real commands: `just fmt`, `just lint`, `just tidy`, `just build`,
+  `just test`, `just run`, `just container-build`, `just container-run`,
+  `just ci`, `just spec-list`, `just spec-validate`, `just install-hooks`.
+  `just ci` runs `pre-commit pre-push spec-validate container-build` and needs a
+  container runtime.
+
+  Conventions: handlers never write SQL; validation lives in internal/todo
+  (title required and at most 200 characters, notes at most 2,000); the store
+  returns store.ErrNotFound; templates and CSS are embedded under
+  internal/web with no third-party assets; mutations use 303 redirects. SQLite
+  is a single-writer store: one process per database file, WAL journaling, a
+  busy timeout, and SetMaxOpenConns(1).

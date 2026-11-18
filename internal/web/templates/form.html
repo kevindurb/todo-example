@@ -1,0 +1,12 @@
+{{define "form.html"}}{{template "header" .}}
+<section class="panel">
+<h2>{{.Heading}}</h2>
+<form class="form" method="post" action="{{.Action}}">
+{{template "form-fields" .}}
+<div class="actions">
+<button type="submit">{{.SubmitLabel}}</button>
+<a class="button" href="/">Cancel</a>
+</div>
+</form>
+</section>
+{{template "footer" .}}{{end}}

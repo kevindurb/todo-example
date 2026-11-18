@@ -1,84 +1,88 @@
-# base
+# todo-example
 
-The template repo for new projects. It carries the workflow scaffolding I want
-in every repo and nothing about a language, build system, or deployment.
+A single-user todo app: one Go binary, server-rendered HTML, and a local SQLite
+database. It has no client-side JavaScript, no external database, and no
+services to run alongside it.
 
-Marked as a GitHub template: **Use this template → Create a new repository**.
+The app is meant to sit on a private network or behind an authenticating proxy.
+It has no accounts or authorization of its own, so do not expose it directly to
+the public internet. See [`docs/deployment.md`](docs/deployment.md).
 
-It also carries a GitHub-native OpenSpec factory: one issue becomes one change,
-landed through a proposal PR, an implementation PR, and an archive PR. The
-factory is the default feature workflow for repositories created from this
-template. See [`docs/factory.md`](docs/factory.md).
+## Quick start
 
-## What's here
+```sh
+just run
+```
 
-| Path | Why |
+Then open <http://localhost:8080>. Todos are stored in `./data/todos.db`, which
+is created on first start.
+
+## What it does
+
+- Add a todo with a required title (up to 200 characters) and optional notes (up
+  to 2,000 characters).
+- Edit a todo's title and notes, mark it done or reopen it, and delete it after
+  a confirmation step.
+- Lists open todos before done ones, newest first within each group.
+- Serves `GET /healthz` for readiness checks and shuts down gracefully on
+  `SIGINT`/`SIGTERM`.
+
+## Commands
+
+| Command | Does |
 |---|---|
-| `justfile` | The command contract. Every repo exposes the same entry points. |
-| `.githooks/` | `pre-commit` and `pre-push`, both thin wrappers over `just`. |
-| `AGENTS.md` | Canonical guide for coding agents: commands, workflow, conventions. |
-| `REVIEW.md` | Generic pre-land review checklist. |
-| `.agents/skills/` | Durable, versioned project conventions. One topic per `SKILL.md`. |
-| `openspec/` | Spec-driven change artifacts (`proposal → specs → design → tasks`). |
-| `.opencode/` | OpenSpec commands, skills, the Aperture provider, and the four phase agents. |
-| `.github/workflows/ci.yml` | Runs `just ci` and `openspec validate --all`. |
-| `.github/workflows/openspec-*.yml` | The factory: propose, apply, archive, lifecycle, verify, revise, janitor, smoke. |
-| `.github/actions/openspec-agent/` | Tailnet, preflight, pinned OpenCode, and one phase agent. |
-| `.github/ISSUE_TEMPLATE/`, `.github/PULL_REQUEST_TEMPLATE.md` | One-change issue form and the three-PR reference. |
-| `scripts/factory-*.sh` | Context, result, status, labels, and change-name helpers. |
-| `docs/factory.md` | Setup, lifecycle, labels, agent boundaries, recovery. |
-| `.editorconfig`, `.gitattributes`, `.gitignore` | Baseline hygiene. |
+| `just` | List recipes |
+| `just fmt` | Format check with `gofmt`; fails when a file is unformatted |
+| `just lint` | `go vet ./...` |
+| `just tidy` | `go mod tidy` |
+| `just build` | Build `bin/todo` |
+| `just test` | Run the Go test suite |
+| `just run` | Run the app locally |
+| `just container-build` | Build the container image as `todo-example:local` |
+| `just container-run` | Run the image with a named `todo-data` volume |
+| `just container-test` | Opt-in acceptance test: build the image and check persistence across a restart |
+| `just pre-commit` | `fmt lint` |
+| `just pre-push` | `build test` |
+| `just ci` | What CI runs: `pre-commit pre-push spec-validate container-build` |
+| `just spec-list` | List OpenSpec changes |
+| `just spec-validate` | Validate every spec and change |
+| `just install-hooks` | Point git at `.githooks` (once per clone) |
 
-## Starting a project
+Run `just ci` before reporting work complete. Do not bypass hooks with
+`--no-verify`.
 
-1. Create the repo from this template — GitHub's **Use this template**, or
-   `gh repo create <name> --template kevindurb/base --private --clone`.
-2. `just install-hooks` — once per clone.
-3. Fill in the contract in `justfile`: replace the failing stubs for `fmt`,
-   `lint`, `build`, and `test` with the project's real commands. `fmt` and
-   `lint` must check, not fix.
-4. Fill in `AGENTS.md`: purpose, the commands table, and conventions.
-5. Fill in the `context:` block in `openspec/config.yaml` — it is what agents
-   read before writing a proposal.
-6. In `justfile`, change `ci: check-template` to
-   `ci: pre-commit pre-push spec-validate` and delete the `check-template`
-   recipe.
-7. Set up the factory, following `docs/factory.md`:
-   - run `scripts/factory-labels.sh --repo OWNER/NAME`;
-   - create a Tailscale federated identity for GitHub Actions WIF and add the
-     `TS_CLIENT_ID` repository variable (and `TS_AUDIENCE` only for a custom
-     audience); use the `sub` prefix printed by the smoke workflow as the
-     identity subject; do not create `TS_OAUTH_SECRET`;
-   - add the tailnet policy grant for `tag:ci` to `tag:ai` on `tcp:443` with the
-     Aperture `role: user` and model capability (and the read-only MCP web
-     connectors if used);
-   - protect `main` with a required PR and the `CI` check;
-   - allow GitHub Actions to create pull requests;
-   - run the **OpenSpec smoke** workflow to verify the OIDC exchange and model
-     preflight.
-   The factory is opt-in for an existing repository; a new repository from the
-   template inherits the files but still needs these settings.
-8. Rewrite this README and add project docs under `docs/`.
-9. Commit.
+## Configuration
 
-### About this repo itself
+| Variable | Default | Purpose |
+|---|---|---|
+| `ADDR` | `:8080` | Listen address, in `host:port` form |
+| `DATABASE_PATH` | `./data/todos.db` | SQLite file; missing parent directories are created |
 
-`base` has no code, so its own `ci` points at `just check-template`, which
-verifies the scaffolding is intact. CI additionally installs OpenSpec and runs
-`openspec validate --all`, so factory artifacts are validated here even though
-the full lifecycle must be tested in a derived repository.
+Startup fails with a message naming the bad value when `ADDR` or
+`DATABASE_PATH` cannot be used.
 
-Do **not** run `just install-hooks` here: the stubs are meant to fail and would
-block template edits.
+## Deployment
 
-## Deliberately not included
+The repository builds a multi-stage image that runs as a non-root user from a
+minimal runtime, with `/data` as the only writable path. Build it with
+`just container-build` and run it with a volume mounted at `/data`; see
+[`docs/deployment.md`](docs/deployment.md) for the full procedure, health check,
+image tags, and backup notes.
 
-Stack-specific build, lint, and test commands; release and tagging policy;
-deploy steps; a licence; `CLAUDE.md` / `.claude/`; and stack overlay
-directories. Those are first-commit decisions for each project, not template
-defaults.
+## Development
 
-The factory also does not include auto-merge, autonomous issue triage, a
-quick-fix lane that bypasses OpenSpec, multi-repo orchestration, or a GitHub
-App for bot-driven label transitions. Those are deliberate v1 boundaries, not
-omissions to patch around.
+The app is a Go module at `github.com/kevindurb/todo-example`:
+
+| Path | Contents |
+|---|---|
+| `cmd/todo` | Configuration, server wiring, signals, and graceful shutdown |
+| `internal/todo` | The todo record and validation rules |
+| `internal/store` | SQLite schema, migrations, and queries |
+| `internal/web` | Routes, handlers, embedded templates, and stylesheet |
+
+SQLite is a single-writer store: run one process per database file. The store
+opens one connection (`SetMaxOpenConns(1)`), uses WAL journaling, and sets a busy
+timeout so writes serialize cleanly.
+
+Feature work goes through the repository's OpenSpec change lifecycle; see
+[`AGENTS.md`](AGENTS.md) and [`docs/factory.md`](docs/factory.md).

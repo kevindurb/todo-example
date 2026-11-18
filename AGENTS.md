@@ -1,13 +1,15 @@
-# <project>
+# todo-example
 
-TODO: one paragraph — what this is, who it is for, and what it explicitly does
-not do.
+A single-user todo web app: one Go binary, server-rendered HTML with no
+client-side JavaScript, and SQLite on a local file. It exists so the repository
+has a real application to build, test, and deploy. It explicitly does not do
+accounts, multi-user isolation, due dates, priorities, tags, search, a JSON API,
+or multi-replica deployment.
 
-This repository started from the `base` template. It carries a GitHub-native
-OpenSpec factory as the default feature workflow: an issue opens a change, and
-three reviewed pull requests — proposal, implementation, and archive — land it.
-See `docs/factory.md` before changing the workflows, agents, labels, or
-templates.
+This repository carries a GitHub-native OpenSpec factory as the default feature
+workflow: an issue opens a change, and three reviewed pull requests — proposal,
+implementation, and archive — land it. See `docs/factory.md` before changing the
+workflows, agents, labels, or templates.
 
 `docs/` holds project documentation. `openspec/` holds change artifacts.
 
@@ -18,30 +20,69 @@ Everything runs through `just`.
 | Command | Does |
 |---|---|
 | `just` | List recipes |
-| `just fmt` | Format check; fails if anything is unformatted |
-| `just lint` | Lint and static analysis |
-| `just build` | Build |
-| `just test` | Test suite |
+| `just fmt` | Format check with `gofmt`; fails if anything is unformatted |
+| `just lint` | `go vet ./...` |
+| `just tidy` | `go mod tidy` |
+| `just build` | Build `bin/todo` |
+| `just test` | `go test ./...` |
+| `just run` | Run the app on `ADDR`/`DATABASE_PATH` |
+| `just container-build` | Build the image as `todo-example:local` |
+| `just container-run` | Run the image with a named `todo-data` volume |
+| `just container-test` | Opt-in acceptance test: build the image and check persistence across a restart |
 | `just pre-commit` | Hook phase: `fmt lint` |
 | `just pre-push` | Hook phase: `build test` |
-| `just ci` | What CI runs |
+| `just ci` | What CI runs: `pre-commit pre-push spec-validate container-build` |
 | `just install-hooks` | Point git at `.githooks` (once per clone) |
 | `just spec-list` | List OpenSpec changes |
 | `just spec-validate` | Validate every spec and change |
-| `just check-template` | Template-only scaffolding check (`base` uses this as `ci`) |
 
-The four checks are stubs until the project fills them in. Run `just ci` before
+`just ci` needs a container runtime because it builds the image. Run it before
 reporting any task complete. If a check fails, fix the code, not the check.
-
-A derived project switches to `ci: pre-commit pre-push spec-validate` once its
-real checks exist. `base` keeps `ci: check-template` because it has no
-application to build or test.
 
 ## Hooks
 
 Run `just install-hooks` once per clone. After that `git commit` runs `fmt` and
 `lint`, and `git push` runs `build` and `test`. Do not bypass hooks with
 `--no-verify`; a broken hook is a bug to fix.
+
+## Code layout
+
+| Path | Contents |
+|---|---|
+| `cmd/todo` | Environment configuration, store and server wiring, signals, graceful shutdown |
+| `internal/todo` | Todo record, field limits, trimming, validation errors |
+| `internal/store` | SQLite open, schema migration, CRUD and list queries |
+| `internal/web` | Routes, handlers, embedded templates and stylesheet |
+| `openspec/` | Specs and change artifacts |
+
+## Conventions
+
+- **Standard library first.** `net/http` and `html/template` handle the web
+  layer. `modernc.org/sqlite` is the only runtime dependency, chosen so
+  `CGO_ENABLED=0` produces a static binary. Justify any new dependency.
+- **SQL stays in `internal/store`.** Handlers never write SQL or hold `*sql.DB`.
+  Every user value is a bound parameter; no SQL string concatenation.
+- **Validation stays in `internal/todo`.** Titles are trimmed and required, at
+  most 200 characters; notes at most 2,000 characters. Rejected input never
+  reaches the store.
+- **Errors are explicit.** The store returns `store.ErrNotFound` for a missing
+  identifier and wrapped errors otherwise. Handlers turn those into `404`,
+  `400`, or `500` responses; nothing is swallowed.
+- **Single writer.** SQLite is a single-writer store. The app sets
+  `SetMaxOpenConns(1)`, WAL journaling, and a busy timeout, and assumes one
+  process per database file. Do not add a connection pool or multi-replica
+  deployment.
+- **No client JavaScript and no third-party assets.** Templates are embedded
+  from `internal/web/templates`, CSS from `internal/web/static`. Do not add a
+  script element, CDN, or remote font. The CSP is deny-by-default.
+- **Mutations use post/redirect/get.** Successful create, edit, status, and
+  delete requests answer `303 See Other` to the list. Completion takes an
+  explicit `done=true`/`done=false`, never a blind toggle.
+- **Logs never contain form values.** Request logs record method, path, status,
+  and duration only.
+- **Tests assert behavior.** Handler tests use `httptest` and a temporary
+  database; store tests use a temporary directory. Prefer a test that would fail
+  if the behavior were reverted.
 
 ## Capturing learnings
 
@@ -89,9 +130,8 @@ before implementation starts — the gate is the approval, not the file.
 
 ### GitHub factory
 
-For feature work in a repository created from this template, the GitHub
-factory is the default path. It is the same OpenSpec lifecycle with GitHub as
-the control plane:
+The GitHub factory is the default path for feature work. It is the same OpenSpec
+lifecycle with GitHub as the control plane:
 
 1. File one issue for one cohesive change (`gh<issue>-<slug>`). Split an issue
    that needs several changes.
@@ -105,12 +145,12 @@ the control plane:
    issue closes and becomes `opsx:done`.
 
 The factory is PR-based by design, for feature work only. It is opt-in for
-existing repositories; new repositories from this template inherit it. Setup —
-labels, the Tailscale WIF client ID/audience, the tailnet policy role/model/MCP
-grant, and branch protection — is in `docs/factory.md`. The agent never has a
-GitHub token or an OIDC token and cannot edit the factory's own control plane.
-Tailscale access uses a GitHub OIDC token exchanged through a federated
-identity (`id-token: write`); there is no long-lived Tailscale secret.
+existing repositories. Setup — labels, the Tailscale WIF client ID/audience, the
+tailnet policy role/model/MCP grant, and branch protection — is in
+`docs/factory.md`. The agent never has a GitHub token or an OIDC token and
+cannot edit the factory's own control plane. Tailscale access uses a GitHub OIDC
+token exchanged through a federated identity (`id-token: write`); there is no
+long-lived Tailscale secret.
 
 ## Workflow
 
@@ -129,14 +169,10 @@ produces those as squash-merged PRs:
    `openspec/` plus the updated `openspec/specs/`.
 
 Do not bypass the factory for feature work merely because it is faster to push
-straight to `main`; the gates are the point. If the project deliberately drops
-a gate, update this section and `docs/factory.md` in the same change.
+straight to `main`; the gates are the point. If the project deliberately drops a
+gate, update this section and `docs/factory.md` in the same change.
 
-## Conventions
-
-TODO as the project acquires them. Keep this list short and push detail into
-`.agents/skills/`: comment discipline, dependency policy, error handling,
-naming, and anything a reviewer has had to say twice.
+## Conventions for the factory itself
 
 The factory's own conventions live in `.agents/skills/github-factory/SKILL.md`.
 Treat the factory control plane — `.github/`, `.opencode/agents/`, and the

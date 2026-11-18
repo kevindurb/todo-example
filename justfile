@@ -4,42 +4,52 @@ default:
     @just --list
 
 # --- Contract -------------------------------------------------------------
-# Hooks and CI call these. Replace each stub with the project's real command.
-# `fmt` and `lint` are checks: exit non-zero when something is wrong, do not
-# fix it in place.
+# Hooks and CI call these. `fmt` and `lint` are checks: exit non-zero when
+# something is wrong, do not fix it in place.
 
 fmt:
-    @echo "justfile: no fmt command configured yet" >&2 && exit 1
+    #!/usr/bin/env bash
+    set -euo pipefail
+    unformatted="$(gofmt -l .)"
+    if [ -n "$unformatted" ]; then
+        echo "gofmt found unformatted files:" >&2
+        echo "$unformatted" >&2
+        exit 1
+    fi
 
 lint:
-    @echo "justfile: no lint command configured yet" >&2 && exit 1
+    go vet ./...
+
+tidy:
+    go mod tidy
 
 build:
-    @echo "justfile: no build command configured yet" >&2 && exit 1
+    go build -trimpath -o bin/todo ./cmd/todo
 
 test:
-    @echo "justfile: no test command configured yet" >&2 && exit 1
+    go test ./...
+
+run:
+    go run ./cmd/todo
+
+container-build:
+    docker build --tag todo-example:local .
+
+container-run:
+    docker run --rm --publish 8080:8080 --volume todo-data:/data todo-example:local
+
+# Opt-in acceptance test; pass a container runtime (and flags) as the argument.
+container-test runtime="docker":
+    TODO_CONTAINER_TEST=1 TODO_CONTAINER="{{runtime}}" go test -count=1 -tags container ./cmd/todo
 
 pre-commit: fmt lint
 pre-push: build test
 
-# Base validates its own scaffolding; a real project uses
-# `ci: pre-commit pre-push spec-validate`.
-ci: check-template
+ci: pre-commit pre-push spec-validate container-build
 
 install-hooks:
     git config core.hooksPath .githooks
     @echo "Hooks installed: pre-commit and pre-push now run via 'just'."
-
-check-template:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    test -f README.md
-    test -f AGENTS.md
-    test -f openspec/config.yaml
-    test -x .githooks/pre-commit
-    test -x .githooks/pre-push
-    echo "template scaffolding OK"
 
 spec-list:
     openspec list
