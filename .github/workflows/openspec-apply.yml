@@ -267,6 +267,30 @@ jobs:
           fi
 
           if [[ $outcome != ok ]]; then
+            if [[ $status == blocked && -d "openspec/changes/${CHANGE}" ]]; then
+              mapfile -t blocked_changed < <({ git diff --name-only; git ls-files --others --exclude-standard; } | sort -u)
+              blocked_control=()
+              for path in "${blocked_changed[@]:-}"; do
+                [[ -z $path ]] && continue
+                case "$path" in
+                  .github/* | .opencode/* | .agents/* | .githooks/* | .git/*) blocked_control+=("$path") ;;
+                esac
+              done
+              if (( ${#blocked_control[@]} == 0 )); then
+                branch="opsx/impl-${CHANGE}"
+                git config user.name "openspec-factory[bot]"
+                git config user.email "openspec-factory@users.noreply.github.com"
+                git checkout -B "$branch"
+                git add --all
+                if ! git diff --cached --quiet; then
+                  git commit -m "${CHANGE}: implement (blocked)"
+                  git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${branch}"
+                  blocked_reason_display="${blocked_reason_display:-$summary} The branch \`${branch}\` was pushed for recovery."
+                elif [[ $REUSED_BRANCH == true ]]; then
+                  blocked_reason_display="${blocked_reason_display:-$summary} The branch \`${branch}\` contains the implementation."
+                fi
+              fi
+            fi
             gh issue edit "$ISSUE" --repo "$REPO" --add-label opsx:blocked >/dev/null 2>&1 || true
             {
               printf '## Apply blocked\n\n'
