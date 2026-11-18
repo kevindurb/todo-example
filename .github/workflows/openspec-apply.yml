@@ -97,6 +97,7 @@ jobs:
           persist-credentials: false
 
       - name: Continue an existing implementation branch
+        id: existing
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -105,11 +106,14 @@ jobs:
           set -euo pipefail
           echo "::add-mask::${GH_TOKEN}"
           branch="opsx/impl-${CHANGE}"
+          reuse=false
           if git ls-remote --exit-code --heads "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "refs/heads/${branch}" >/dev/null 2>&1; then
             git fetch --no-tags "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "refs/heads/${branch}"
             git checkout -B "$branch" FETCH_HEAD
+            reuse=true
             echo "Continuing existing branch ${branch}"
           fi
+          echo "reuse=${reuse}" >> "$GITHUB_OUTPUT"
 
       - name: Build the agent context
         env:
@@ -139,6 +143,7 @@ jobs:
           CHANGE: ${{ needs.guard.outputs.change }}
           EXPECTED_PHASE: apply
           EXPECTED_CHANGE: ${{ needs.guard.outputs.change }}
+          REUSED_BRANCH: ${{ steps.existing.outputs.reuse }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -161,9 +166,8 @@ jobs:
           task_checked=false
 
           if [[ $status == ok ]]; then
-            if ! grep -q '^- \[ \]' "openspec/changes/${CHANGE}/tasks.md" 2>/dev/null; then
-              outcome=blocked
-              blocked_reason_display="The change has no pending tasks. Archive it instead of applying it again."
+            if [[ $REUSED_BRANCH == true ]] && grep -Eiq '^- \[x\]' "openspec/changes/${CHANGE}/tasks.md" 2>/dev/null; then
+              task_checked=true
             fi
             if git diff --unified=0 -- "openspec/changes/${CHANGE}/tasks.md" | grep -Eiq '^\+.*- \[x\]'; then
               task_checked=true
@@ -201,8 +205,10 @@ jobs:
               git checkout -B "$branch"
               git add --all
               if git diff --cached --quiet; then
-                outcome=blocked
-                blocked_reason_display="The apply agent reported success but produced no commit."
+                if [[ $REUSED_BRANCH != true ]]; then
+                  outcome=blocked
+                  blocked_reason_display="The apply agent reported success but produced no commit."
+                fi
               else
                 git commit -m "${CHANGE}: implement"
                 git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${branch}"
