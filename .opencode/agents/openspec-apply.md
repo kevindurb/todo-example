@@ -99,6 +99,11 @@ Your job:
 The workflow verifies that `tasks.md` contains at least one newly checked
 task (`- [ ]` to `- [x]`); update the task list before finishing.
 
+If the only remaining verification requires a human reviewer (for example, a
+container restart check), leave that task unchecked, name it in the report, and
+still report `ok`; the implementation PR is the review surface. Block only when
+the implementation is incomplete or a required decision is unresolved.
+
 Result contract. Write `.agent/result.json`:
 
 ```json
