@@ -41,12 +41,12 @@ func (e *ValidationError) Error() string {
 	return "invalid todo input"
 }
 
-// Validate trims surrounding whitespace and checks the field limits. It
-// returns the normalized input together with a *ValidationError when the
-// submission is not acceptable.
+// Validate trims surrounding whitespace from the title and checks the field
+// limits. Notes are stored exactly as submitted. It returns the normalized
+// input together with a *ValidationError when the submission is not
+// acceptable.
 func Validate(in Input) (Input, error) {
 	in.Title = strings.TrimSpace(in.Title)
-	in.Notes = strings.TrimSpace(in.Notes)
 
 	fields := make(map[string]string)
 	switch {

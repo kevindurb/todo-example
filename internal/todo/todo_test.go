@@ -14,8 +14,8 @@ func TestValidateAcceptsValidTodo(t *testing.T) {
 	if got.Title != "Buy milk" {
 		t.Errorf("Title = %q, want trimmed value", got.Title)
 	}
-	if got.Notes != "two litres" {
-		t.Errorf("Notes = %q, want trimmed value", got.Notes)
+	if got.Notes != "  two litres  " {
+		t.Errorf("Notes = %q, want the submitted value preserved", got.Notes)
 	}
 }
 
