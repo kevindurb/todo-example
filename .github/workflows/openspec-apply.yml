@@ -158,16 +158,15 @@ jobs:
           outcome=blocked
           pr=""
           blocked_reason_display="$blocked_reason"
+          task_checked=false
 
           if [[ $status == ok ]]; then
-            before=$(grep -c '^- \[ \]' "openspec/changes/${CHANGE}/tasks.md" 2>/dev/null || true)
-            after=$(grep -c '^- \[ \]' "openspec/changes/${CHANGE}/tasks.md" 2>/dev/null || true)
-            if (( before == 0 )); then
+            if ! grep -q '^- \[ \]' "openspec/changes/${CHANGE}/tasks.md" 2>/dev/null; then
               outcome=blocked
               blocked_reason_display="The change has no pending tasks. Archive it instead of applying it again."
-            elif (( after >= before )); then
-              outcome=blocked
-              blocked_reason_display="The apply agent did not check any task in tasks.md."
+            fi
+            if git diff --unified=0 -- "openspec/changes/${CHANGE}/tasks.md" | grep -Eiq '^\+.*- \[x\]'; then
+              task_checked=true
             fi
 
             mapfile -t changed < <({ git diff --name-only; git ls-files --others --exclude-standard; } | sort -u)
@@ -208,6 +207,11 @@ jobs:
                 git commit -m "${CHANGE}: implement"
                 git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${branch}"
               fi
+            fi
+
+            if [[ $outcome != blocked && $task_checked != true ]]; then
+              outcome=blocked
+              blocked_reason_display="The apply agent did not check any task in tasks.md. The branch \`${branch}\` was pushed for recovery, but no PR was opened."
             fi
 
             if [[ $outcome != blocked ]]; then
@@ -264,8 +268,11 @@ jobs:
               printf 'Remove `opsx:blocked` and re-apply `opsx:implement` to retry.\n'
             } > /tmp/impl-blocked.md
             gh issue comment "$ISSUE" --repo "$REPO" --body-file /tmp/impl-blocked.md >/dev/null
+            proposal=$(gh pr list --repo "$REPO" --state merged --head "opsx/propose-${CHANGE}" --json number --jq '.[0].number // empty')
+            impl=$(gh pr list --repo "$REPO" --state all --head "opsx/impl-${CHANGE}" --json number --jq '.[0].number // empty')
             REPO="$REPO" ISSUE_NUMBER="$ISSUE" CHANGE_NAME="$CHANGE" \
               STATE=opsx:blocked BLOCKED_REASON="${blocked_reason_display:-$summary}" \
+              PROPOSAL_PR="$proposal" IMPL_PR="$impl" \
               RUN_URL="$RUN_URL" \
               NEXT_ACTION="Read the blocking reason, then remove opsx:blocked and re-apply opsx:implement." \
               ./scripts/factory-status.sh || true

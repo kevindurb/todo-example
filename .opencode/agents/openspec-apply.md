@@ -96,6 +96,9 @@ Your job:
 7. Never run `git push`, `git commit`, `gh`, `curl`, `wget`, or `ssh`, and never
    start a subagent. Do not perform GitHub side effects.
 
+The workflow verifies that `tasks.md` contains at least one newly checked
+task (`- [ ]` to `- [x]`); update the task list before finishing.
+
 Result contract. Write `.agent/result.json`:
 
 ```json
