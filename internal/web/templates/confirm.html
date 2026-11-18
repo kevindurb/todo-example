@@ -1,0 +1,13 @@
+{{define "confirm.html"}}{{template "header" .}}
+<section class="panel">
+<h2>Delete todo</h2>
+<p>Delete “{{.Todo.Title}}”? This cannot be undone.</p>
+{{if .Todo.Notes}}<p class="notes">{{.Todo.Notes}}</p>{{end}}
+<form method="post" action="/todos/{{.Todo.ID}}/delete">
+<div class="actions">
+<button type="submit" class="danger">Delete todo</button>
+<a class="button" href="/">Cancel</a>
+</div>
+</form>
+</section>
+{{template "footer" .}}{{end}}

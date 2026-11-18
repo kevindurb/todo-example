@@ -1,0 +1,33 @@
+{{define "header"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} · Todo</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="site-header">
+<a class="brand" href="/">Todo</a>
+</header>
+<main class="page">
+{{end}}
+
+{{define "footer"}}
+</main>
+</body>
+</html>
+{{end}}
+
+{{define "form-fields"}}
+<div class="field">
+<label for="title">Title</label>
+<input id="title" name="title" type="text" value="{{.Form.Title}}" maxlength="200" autocomplete="off" required>
+{{with index .Errors "title"}}<p class="error" role="alert">{{.}}</p>{{end}}
+</div>
+<div class="field">
+<label for="notes">Notes</label>
+<textarea id="notes" name="notes" rows="4" maxlength="2000">{{.Form.Notes}}</textarea>
+{{with index .Errors "notes"}}<p class="error" role="alert">{{.}}</p>{{end}}
+</div>
+{{end}}

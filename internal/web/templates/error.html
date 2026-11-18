@@ -1,0 +1,7 @@
+{{define "error.html"}}{{template "header" .}}
+<section class="panel">
+<h2>{{.Heading}}</h2>
+<p>{{.Message}}</p>
+<p><a class="button" href="/">Back to the list</a></p>
+</section>
+{{template "footer" .}}{{end}}

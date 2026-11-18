@@ -1,0 +1,38 @@
+{{define "list.html"}}{{template "header" .}}
+<section class="panel">
+<h2>Add a todo</h2>
+<form class="form" method="post" action="/todos">
+{{template "form-fields" .}}
+<div class="actions">
+<button type="submit">Add todo</button>
+</div>
+</form>
+</section>
+
+<section class="panel">
+<h2>Your todos</h2>
+{{if .Todos}}
+<ul class="todos">
+{{range .Todos}}
+<li class="todo{{if .Done}} done{{end}}">
+<div class="summary">
+<span class="title">{{.Title}}</span>
+<span class="state">{{if .Done}}Done{{else}}Open{{end}}</span>
+{{if .Notes}}<p class="notes">{{.Notes}}</p>{{end}}
+</div>
+<div class="controls">
+<a class="button" href="/todos/{{.ID}}/edit">Edit</a>
+<form method="post" action="/todos/{{.ID}}/status">
+{{if .Done}}<input type="hidden" name="done" value="false"><button type="submit">Reopen</button>
+{{else}}<input type="hidden" name="done" value="true"><button type="submit">Mark done</button>{{end}}
+</form>
+<a class="button danger" href="/todos/{{.ID}}/delete">Delete</a>
+</div>
+</li>
+{{end}}
+</ul>
+{{else}}
+<p class="empty">No todos yet. Add the first one using the form above.</p>
+{{end}}
+</section>
+{{template "footer" .}}{{end}}
