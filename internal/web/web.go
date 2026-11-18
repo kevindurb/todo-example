@@ -156,6 +156,12 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// An unknown todo is not-found regardless of the submitted input, so a
+	// validation error cannot mask a missing record.
+	if _, err := s.store.Get(r.Context(), id); err != nil {
+		s.storeError(w, r, err)
+		return
+	}
 	in, ok := s.parseForm(w, r)
 	if !ok {
 		return
@@ -175,6 +181,12 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSetStatus(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.todoID(w, r)
 	if !ok {
+		return
+	}
+	// An unknown todo is not-found regardless of the submitted input, so a
+	// malformed completion value cannot mask a missing record.
+	if _, err := s.store.Get(r.Context(), id); err != nil {
+		s.storeError(w, r, err)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)

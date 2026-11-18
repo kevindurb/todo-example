@@ -304,16 +304,19 @@ func TestUnknownTodoIsNotFound(t *testing.T) {
 	cases := []struct {
 		method string
 		target string
+		form   url.Values
 	}{
-		{http.MethodGet, "/todos/999/edit"},
-		{http.MethodPost, "/todos/999/edit"},
-		{http.MethodPost, "/todos/999/status"},
-		{http.MethodGet, "/todos/999/delete"},
-		{http.MethodPost, "/todos/999/delete"},
-		{http.MethodGet, "/todos/not-a-number/edit"},
+		{http.MethodGet, "/todos/999/edit", nil},
+		{http.MethodPost, "/todos/999/edit", url.Values{"title": {"x"}}},
+		{http.MethodPost, "/todos/999/edit", url.Values{"title": {""}}},
+		{http.MethodPost, "/todos/999/status", url.Values{"done": {"true"}}},
+		{http.MethodPost, "/todos/999/status", url.Values{"done": {"maybe"}}},
+		{http.MethodGet, "/todos/999/delete", nil},
+		{http.MethodPost, "/todos/999/delete", nil},
+		{http.MethodGet, "/todos/not-a-number/edit", nil},
 	}
 	for _, tc := range cases {
-		rec := request(srv, tc.method, tc.target, url.Values{"title": {"x"}, "done": {"true"}})
+		rec := request(srv, tc.method, tc.target, tc.form)
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("%s %s status = %d, want %d", tc.method, tc.target, rec.Code, http.StatusNotFound)
 		}

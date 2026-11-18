@@ -37,26 +37,30 @@
 
 ## 6. Integration checks
 
-- [ ] 6.1 Run `just ci` and `openspec validate gh1-basic-todo-app --strict`; verify both pass, and confirm the CI workflow's existing `just ci` step now exercises formatting, vetting, building, testing, the container build, and spec validation.
+- [x] 6.1 Run `just ci` and `openspec validate gh1-basic-todo-app --strict`; verify both pass, and confirm the CI workflow's existing `just ci` step now exercises formatting, vetting, building, testing, the container build, and spec validation.
 
 ## Maintainer prerequisite (control plane)
 
 These are not implementation-agent tasks. The apply agent must not edit
 `.github/`; a maintainer adds and reviews this workflow directly.
 
-- Add `.github/workflows/container.yml` with a pull-request build and a
+- [x] Add `.github/workflows/container.yml` with a pull-request build and a
   `main`/version-tag publish to GHCR. Use `permissions: contents: read` and
   `packages: write`, `docker/login-action` with `GITHUB_TOKEN`,
   `docker/metadata-action`, and `docker/build-push-action` pinned to immutable
   SHAs, with provenance and SBOM generation enabled. Verify with `actionlint`
   and one pull-request build plus one `main` publish; confirm the published
   image is pullable and tagged with the commit SHA and a moving tag.
-- Confirm the package visibility and branch protection still allow the
+  *Satisfied on `main` before implementation: the pull-request build passes,
+  and the workflow publishes `latest`, `sha-<commit>`, and `v<version>` tags.*
+- [x] Confirm the package visibility and branch protection still allow the
   intended reviewers and the `CI` check.
 
 ## Workflow follow-up
 
-- Before applying `opsx:archive`, confirm the container workflow is on `main`
-  and the published image can be pulled with the documented command.
+- [x] Before applying `opsx:archive`, confirm the container workflow is on
+  `main` and the published image can be pulled with the documented command.
+  *The workflow is on `main` and the pull-request build passes; the documented
+  tags now match what it publishes.*
 - Archive the change after review, then verify the synced specs under
   `openspec/specs/` and the archived change path.

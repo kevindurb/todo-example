@@ -13,9 +13,9 @@ running as a non-root user, with SQLite on a mounted data volume.
 |---|---|
 | Registry | GitHub Container Registry |
 | Image | `ghcr.io/kevindurb/todo-example` |
-| Default tag | `main` (moving) |
+| Default tag | `latest` (moving `main`) |
 | Commit tag | `sha-<commit>` |
-| Release tag | the pushed version tag, for example `1.2.3` |
+| Release tag | the pushed `v<version>` tag, for example `v1.2.3` |
 | Port | `8080` |
 | Data path | `/data/todos.db` |
 | Runtime user | non-root (`65532`) |
@@ -46,7 +46,7 @@ docker run --detach \
   --name todo \
   --publish 8080:8080 \
   --volume todo-data:/data \
-  ghcr.io/kevindurb/todo-example:main
+  ghcr.io/kevindurb/todo-example:latest
 ```
 
 Then open <http://localhost:8080>. The named volume keeps the database across
@@ -62,7 +62,7 @@ docker run --detach \
   --env ADDR=:9000 \
   --env DATABASE_PATH=/data/todos.db \
   --volume todo-data:/data \
-  ghcr.io/kevindurb/todo-example:main
+  ghcr.io/kevindurb/todo-example:latest
 ```
 
 | Variable | Container default | Meaning |

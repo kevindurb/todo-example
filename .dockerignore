@@ -6,6 +6,13 @@
 .githooks
 .gitignore
 .dockerignore
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets.yaml
+secrets.yml
 bin
 data
 *.db
